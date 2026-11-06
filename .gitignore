@@ -1,0 +1,23 @@
+# 依赖与构建产物
+node_modules/
+dist/
+release/
+build/
+*.tsbuildinfo
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.workbuddy/
+
+# 日志与临时文件
+*.log
+.tmp-*
+
+# 测试截图（本地跑 CDP 测试时生成）
+ui-*.png
+osu-import-e2e*.png
+tl-lanes-scrolled.png
+keysound-*.png
