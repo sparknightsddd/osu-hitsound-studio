@@ -98,5 +98,30 @@ T('[Files] path 可以写相对路径', docRel.baseDir.replace(/\\/g, '/') === '
 T('相对 path 下的音效也能解析', /charts[\\/]target[\\/]sounds[\\/]hitnormal\.wav$/i.test(docRel.hitsounds[0]?.resolvedPath || ''), docRel.hitsounds[0]?.resolvedPath)
 T('settings.Path 保留原文（用于显示/写回）', docRel.settings.Path === 'target', docRel.settings.Path)
 
+// 代号只有大小写不同：Windows 文件名不区分大小写，不能都叫 a.wav
+const CASE = `[Metadata]
+Title = case
+
+[Files]
+path = "C:/charts/case"
+
+[Define]
+hitsound custom a = "sounds/a.wav"
+hitsound custom A = "sounds/A.wav"
+
+[Timing]
+0,bpm(120),4,0,0
+
+[Hitsound]
+#0
+/a A = =/`
+const planCase = planSoundBundle(parseChart(CASE, { baseDir: 'C:/charts' }), 'C:/charts/case.hs')
+const names = planCase.copies.map((c) => c.fileName).sort()
+T(
+  '只有大小写不同的代号：文件名加后缀，不会互相覆盖',
+  planCase.copies.length === 2 && new Set(names.map((n) => n.toLowerCase())).size === 2,
+  names.join(' / '),
+)
+
 console.log(`RESULT ${pass} passed, ${fail} failed`)
 process.exit(fail ? 1 : 0)

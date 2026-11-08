@@ -23,7 +23,7 @@ import VolumeControl from './VolumeControl'
 import MapsetBrowser from './MapsetBrowser'
 import SoundLibrary from './SoundLibrary'
 import { isDesktop } from '../core/desktop'
-import { importOsuSounds, openChartFolder } from '../core/actions'
+import { closeChart, importOsuSounds, openChartFolder } from '../core/actions'
 import { t } from '../i18n'
 
 export default function SideBar() {
@@ -128,7 +128,6 @@ function Explorer() {
   const activeId = useStore((s) => s.activeId)
   const setActive = useStore((s) => s.setActive)
   const renameFile = useStore((s) => s.renameFile)
-  const closeFile = useStore((s) => s.closeFile)
   const [editing, setEditing] = useState<string | null>(null)
 
   return (
@@ -177,7 +176,7 @@ function Explorer() {
               title={t('关闭')}
               onClick={(e) => {
                 e.stopPropagation()
-                closeFile(f.id)
+                void closeChart(f.id)
               }}
             >
               <IconClose className="sm" />

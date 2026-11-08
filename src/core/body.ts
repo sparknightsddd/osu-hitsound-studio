@@ -7,7 +7,7 @@ import type {
   PhraseDef,
   TimingPoint,
 } from './types'
-import { beatAt } from './measures'
+import { beatAt, beatTimeOf, measureBeatLayout } from './measures'
 import type { MeasureGrid } from './measures'
 import { letterToSemi, midiToName, newPitchState, resolvePitch, type PitchState } from './pitch'
 
@@ -150,9 +150,11 @@ export function tokenizeBody(src: string, base: number, diags: Diagnostic[]): To
       i = j
       continue
     }
-    if (c >= 'A' && c <= 'Z') {
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+      // 代号大小写不限，所以一整段连续字母就是一个代号：
+      // `AaAa` 是一个名字（不再是 `Aa` + `Aa`），音符之间必须用空格隔开。
       let j = i + 1
-      while (j < src.length && src[j] >= 'a' && src[j] <= 'z') j++
+      while (j < src.length && /[A-Za-z]/.test(src[j])) j++
       push('note', i, j)
       i = j
       continue
@@ -215,6 +217,33 @@ export interface BodyCtx {
 }
 
 const STANDARD_NAMES = new Set(['W', 'F', 'C', 'Ws', 'Fs', 'Cs', 'Wfcs', 'Dwfcs'])
+
+/**
+ * 给「连写导致整段被当成一个代号」的情况找一条提示：
+ * `AaAa` 在 [Define] 里是 `Aa`，就提示写成 `Aa Aa`。
+ */
+function splitIntoDefined(name: string, defined: Set<string>): string[] | null {
+  if (name.length < 2) return null
+  const memo = new Map<number, string[] | null>()
+  const walk = (at: number): string[] | null => {
+    if (at === name.length) return []
+    if (memo.has(at)) return memo.get(at)!
+    for (let end = name.length; end > at; end--) {
+      const piece = name.slice(at, end)
+      if (!defined.has(piece)) continue
+      const rest = walk(end)
+      if (rest) {
+        const out = [piece, ...rest]
+        memo.set(at, out)
+        return out
+      }
+    }
+    memo.set(at, null)
+    return null
+  }
+  const out = walk(0)
+  return out && out.length > 1 ? out : null
+}
 
 interface Region {
   toks: Tok[]
@@ -490,11 +519,14 @@ function parseUnits(toks: Tok[], from: number, to: number, ctx: BodyCtx, nested:
         if (!ctx.defined.has(name) && !(ctx.standardFormat && STANDARD_NAMES.has(name))) {
           if (!ctx.undefinedNames.has(name)) {
             ctx.undefinedNames.add(name)
+            const split = splitIntoDefined(name, ctx.defined)
             ctx.diags.push({
               from: t.from,
               to: t.to,
               severity: 'warning',
-              message: `音效 "${name}" 未在 [Define] 中定义`,
+              message: split
+                ? `音效 "${name}" 未在 [Define] 中定义；要写成 "${split.join(' ')}"（代号之间必须有空格）`
+                : `音效 "${name}" 未在 [Define] 中定义`,
               code: 'hs-undefined',
             })
           }
@@ -990,15 +1022,34 @@ export function parseHitsoundBody(lines: LineInfo[], ctx: BodyCtx): BodyResult {
     const total = lead + sumDur(units)
     if (total <= 0) return
     const unitDur = (end - start) / total
+    /**
+     * 小节中途变过 BPM（segments）时，不能按整小节时长均分：
+     * 第 3 拍在 1000ms，均分却会算成 750ms，格子里的音符就整体错位。
+     * 把「第几个时值单位」按总拍数换算成拍位，再用 beatTimeOf 映射回时间，
+     * 和 measureTicks / 格子视图用同一套拍位算法。
+     *
+     * 只处理「一个区域正好一个小节」的普通写法；跨小节 / 重复写法仍按时间均分。
+     */
+    const segmented = span === 1 && !!first.segments && first.segments.length > 1
+    /**
+     * 用「拍起点个数」而不是 layout.beats（可能是 3.9967 这种小数）：
+     * 红线可能比理论小节末尾早一点点，按 3.9967 均分会让后面的 token
+     * 每个都提前 1ms 左右，正好掉到上一格。16 个 token 的 1/4 网格里，
+     * 第 9 个 token 应该是第 3 拍（beat 2.0），不能用 3.9967/4 去压。
+     */
+    const totalBeats = segmented ? measureBeatLayout(first).times.length : 0
+    const timeAt = (pos: number) =>
+      segmented ? beatTimeOf(first, (pos / total) * totalBeats) : start + pos * unitDur
     if (lead > 0 && events.length) {
       const prev = events[events.length - 1]
-      prev.duration += lead * unitDur
+      prev.duration += timeAt(lead) - start
     }
-    let cursor = start + lead * unitDur
+    let pos = lead
     for (const u of units) {
-      const s = u.dur * unitDur
-      emitUnit(u, cursor, s, events, ctx, first)
-      cursor += s
+      const t0 = timeAt(pos)
+      const t1 = timeAt(pos + u.dur)
+      emitUnit(u, t0, t1 - t0, events, ctx, first)
+      pos += u.dur
     }
   }
 

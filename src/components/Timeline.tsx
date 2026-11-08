@@ -6,6 +6,7 @@ import { fmtOsuTime } from '../core/time'
 import { measureTicks } from '../core/measures'
 import { clampToRange, isBlackKey, midiToName } from '../core/pitch'
 import { alphaForVolume } from '../core/colors'
+import { codeGlyph } from '../core/codes'
 import { getDisplayPrefs } from '../core/displayPrefs'
 import {
   PRIORITY_ALPHA as LINE_A,
@@ -443,7 +444,7 @@ export default function Timeline({ doc, theme, onPlaySample }: Props) {
       for (let i = 0; i < laneCount; i++) {
         const y = HEADER_H + i * LANE_H + LANE_H / 2 - ls
         if (y < HEADER_H + 6 || y > mainH - 4) continue
-        ctx.fillText(lanes[i].slice(0, 9), 8, y)
+        ctx.fillText(codeGlyph(lanes[i]).slice(0, 9), 8, y)
       }
       // 竖向滚动条：行数超出可视高度时贴在名字栏右侧，提示这里可以滚
       if (lg.maxScroll > 0) {

@@ -339,7 +339,8 @@ export const useStore = create<State>((set, get) => ({
   setBrushMode: (m) => set({ brushMode: m }),
   setBrushPin: (n) => set({ brushPin: n }),
   setKsInst: (n) => set({ ksInst: n }),
-  setKsBase: (n) => set({ ksBase: Math.max(21, Math.min(97, Math.round(n) || 60)) }),
+  // 锚点是「八度的 C」：C1(24) ~ C8(108)；A0–B0 直接点琴键
+  setKsBase: (n) => set({ ksBase: Math.max(24, Math.min(108, Math.round(n) || 60)) }),
   log: (msg) => {
     const t = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     set((s) => ({ output: [...s.output.slice(-199), `[${t}] ${msg}`] }))

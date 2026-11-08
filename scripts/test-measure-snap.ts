@@ -5,7 +5,8 @@
  *   1) 红线比自然结束点早 10ms → 小节被截成 3.976 拍，格子原来按整拍排，
  *      点最后一格写出来的音符会掉回前一格、整个小节还会「音符不在格子上」拒绝编辑；
  *   2) 红线比自然结束点晚 10ms → 切出一个 10.7ms 的碎片小节，被画成一整拍（多 3 格）；
- *   3) 同 BPM 的继承型 Timing 落在小节中间 → 被拆成两段，格子拒绝编辑。
+ *   3) 同 BPM 的继承型 Timing 落在小节中间 → 不拆段；
+ *   4) 真变速 + 红线提前截断 → token 仍精确落在拍点，不能整体提前一格。
  */
 import { parseChart } from '../src/core/parse'
 import { measureBeatLayout, measureTicks } from '../src/core/measures'
@@ -88,13 +89,73 @@ const fmt = (t: number) => (t / 1000).toFixed(3)
   T('这一小节可以写回', res.ok, res.ok ? '' : res.reason)
 }
 
-// ---- 4) 真变速：仍然拆段，且不允许在格子里改 ----
+// ---- 4) 真变速：拆段，并且可以正常读写格子 ----
 {
   const text = head(['0,500,4,0,0', '1000,250,4,0,2'], ['#0', '/Aa = = =/'])
   const doc = parseChart(text)
   T('真变速仍拆段', (doc.measures[0].segments?.length ?? 0) === 2)
+  T('第三拍起点是 1000ms', Math.abs(measureTicks(doc.measures[0], 4)[8] - 1000) < 1e-6)
   const rd = readMeasureCells(doc, 0, 4)
-  T('真变速小节仍然拒绝写回（按设计）', !rd.ok, rd.ok ? '' : rd.reason)
+  T('真变速小节可以读格', rd.ok, rd.ok ? '' : rd.reason)
+
+  // 在第三拍第一格（k=8）写一个音效：正文要落在 1000ms，而不是均分的 750ms
+  const res = applyCellEdits(doc, [{ mi: 0, k: 8, next: () => ['Aa'] }], 4)
+  T('真变速小节可以写回', res.ok, res.ok ? '' : res.reason)
+  if (res.ok) {
+    const d2 = parseChart(res.text!)
+    const ev = d2.events.find((e) => e.names.includes('Aa') && Math.abs(e.time - 1000) < 1)
+    T('第三拍写入落在 1000ms', !!ev, d2.events.map((e) => `${fmt(e.time)}:${e.names.join('+')}`).join(' '))
+
+    // 再把这个格子删掉
+    const del = applyCellEdits(d2, [{ mi: 0, k: 8, next: () => [] }], 4)
+    T('第三拍的音效删得掉', del.ok, del.ok ? '' : del.reason)
+    if (del.ok) {
+      const d3 = parseChart(del.text!)
+      T('删掉后 1000ms 没有音符', !d3.events.some((e) => Math.abs(e.time - 1000) < 1))
+    }
+  }
+}
+
+// ---- 4b) 16 个 token 的正文：第 9 个 token 必须在第三拍 1000ms ----
+{
+  const tokens = Array.from({ length: 16 }, (_, i) => (i === 8 ? 'Aa' : '='))
+  const text = head(['0,500,4,0,0', '1000,250,4,0,2'], ['#0', '/' + tokens.join(' ') + '/'])
+  const doc = parseChart(text)
+  const ev = doc.events.find((e) => e.names.includes('Aa'))
+  T('16 格里第 9 格解析为 1000ms', !!ev && Math.abs(ev.time - 1000) < 1e-6, ev ? fmt(ev.time) : 'none')
+  T('这一格读到第 8 格（1/4 细分）', (() => {
+    const rd = readMeasureCells(doc, 0, 4)
+    return rd.ok && rd.cells[8]?.names.includes('Aa')
+  })())
+}
+
+// ---- 4c) 变速 + 红线提前截断：16 个 token 不能整体提前一格 ----
+{
+  const tokens = Array.from({ length: 16 }, (_, i) => ([6, 8, 12].includes(i) ? 'Aa' : '='))
+  const text = head(
+    ['0,555.555556,4,0,0', '1110.87302,550.458716,4,0,2', '2210,555.555556,4,1,0'],
+    ['#0', '/' + tokens.join(' ') + '/'],
+  )
+  const doc = parseChart(text)
+  const m = doc.measures[0]
+  const ticks = measureTicks(m, 4)
+  T('变速+截断小节仍拆段', (m.segments?.length ?? 0) === 2)
+  const evs = doc.events.filter((e) => e.names.includes('Aa'))
+  T(
+    '三个音都精确落在拍点上',
+    evs.length === 3 && evs.every((e) => ticks.some((t) => Math.abs(t - e.time) < 1e-6)),
+    evs.map((e) => e.time.toFixed(3)).join(','),
+  )
+  const rd = readMeasureCells(doc, 0, 4)
+  T('读格落在第 7/9/13 格', rd.ok && [6, 8, 12].every((k) => rd.cells[k]?.names.includes('Aa')))
+
+  const del7 = applyCellEdits(doc, [{ mi: 0, k: 7, next: () => [] }], 4)
+  T('删空格子不会误删别的音', del7.ok && parseChart(del7.text!).events.filter((e) => e.names.includes('Aa')).length === 3)
+  const del8 = applyCellEdits(doc, [{ mi: 0, k: 8, next: () => [] }], 4)
+  T(
+    '删第 9 格能删掉第三拍那个音',
+    del8.ok && !parseChart(del8.text!).events.some((e) => Math.abs(e.time - ticks[8]) < 1e-6),
+  )
 }
 
 // ---- 5) 完整小节：格子位置一点没变 ----

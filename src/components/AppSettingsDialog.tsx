@@ -176,7 +176,7 @@ export default function AppSettingsDialog() {
   if (!(Number(inheritMs) > 0)) bad.push('继承阈值必须是正数（毫秒）')
   for (const k of COMBO_KEYS) {
     const list = invalidTokens(prefs[k] || '')
-    if (list.length) bad.push(`${k} 里的 ${list.join(', ')} 不是合法代号（大写字母开头 + 小写字母，或用 = 表示白板）`)
+    if (list.length) bad.push(`${k} 里的 ${list.join(', ')} 不是合法代号（只能用英文字母，大小写不限；或用 = 表示白板）`)
   }
   const order = textToOrder(orderText)
   if (!isValidOrder(order)) bad.push('导出槽位顺序要正好 9 个、互不重复（如 sw, sf, sc, nw, nf, nc, dw, df, dc）')

@@ -10,13 +10,17 @@
  *   （[Aa Ac] 把 Aa 换成 Ab → [Ab Ac]；[Aa Ab] → [Ab]，不会出现两个 Ab）
  * - 完全替换：整格直接变成替换内容（[Aa Ac] → [Ab]），新内容留空就是把这一格清空
  */
+import { normalizeCodeInput } from './codes'
 
-/** 从输入框解析代号列表：去掉方括号，按空格/逗号/顿号切分，去重 */
+/**
+ * 从输入框解析代号列表：去掉方括号，按空格/逗号/顿号切分，去重。
+ * 单个数字/符号按网格习惯转成正文名（`1` → `One`、`/` → `Slash`）。
+ */
 export function parseCodes(text: string): string[] {
   const body = String(text || '').replace(/[[\]]/g, ' ')
   const out: string[] = []
   for (const tok of body.split(/[\s,，、]+/)) {
-    const t = tok.trim()
+    const t = normalizeCodeInput(tok.trim()) || tok.trim()
     if (t && !out.includes(t)) out.push(t)
   }
   return out

@@ -364,5 +364,33 @@ hitsound soft-hitclap Ad = "d.wav"
   ok(added.beatLength === -50, `新绿线沿用 -50（2.0x）：${added.beatLength}`)
 }
 
+// 16) 导出时 [TimingPoints] 的采样组一律 soft（绿线 d/n/s → soft，auto 也改掉）
+{
+  const doc = parseChart(
+    HEAD(
+      ['hitsound drum-hitclap Aa = "a.wav"', 'hitsound normal-hitwhistle Ab = "b.wav"'].join('\n'),
+      ['#0', '/<v=70> Aa/', '#2000', '/<v=40> Ab/'].join('\n'),
+    ),
+  )
+  const plan = planOsuExport(doc)
+  ok(plan.errors.length === 0, `没有报错：${plan.errors.join(' / ')}`)
+  const reds = plan.timing.filter((t) => t.uninherited === 1)
+  const greens = plan.timing.filter((t) => t.uninherited === 0)
+  ok(reds.length >= 1 && greens.length >= 1, `红线 ${reds.length} 条、绿线 ${greens.length} 条`)
+  ok(plan.timing.every((t) => t.sampleSet === 2), `所有线都是 soft：${plan.timing.map((t) => t.sampleSet).join(',')}`)
+
+  const section = plan.text.split('[TimingPoints]')[1].split('[HitObjects]')[0]
+  const rows = section.split(/\r?\n/).filter((l) => l.trim() && l.includes(','))
+  const sets = rows.map((l) => l.split(',')[3])
+  ok(rows.length >= 2, `[TimingPoints] 有 ${rows.length} 行`)
+  ok(sets.every((v) => v === '2'), `文本里的第 4 段全是 2：${sets.join(',')}`)
+  ok(!sets.some((v) => v === '0' || v === '1' || v === '3'), '没有残留 auto / normal / drum')
+
+  // 物件本身的 normalSet/additionSet 不动（决定实际读哪个 wav）
+  const hs = plan.hitObjects[0].split(',')[5].split(':')
+  ok(hs[1] === '3', `物件的 additionSet 还是 drum(3)：${plan.hitObjects[0]}`)
+  ok(hs[2] === '0' && hs[3] === '0', '物件末尾仍然是 0:0（编号/音量交给绿线）')
+}
+
 console.log(bad ? `\n${bad} 项失败` : '\n全部通过')
 process.exitCode = bad ? 1 : 0

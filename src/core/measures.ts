@@ -127,7 +127,7 @@ export class MeasureGrid {
         // 继承型变更落在本小节中间：前 r 拍用旧 BPM，其余拍用新 BPM
         const newBl = inh.beatLength > 0 ? inh.beatLength : bl
         // BPM 没变（.osu 里常见：同一条红线又写了一遍，只为改 offset 的相位）：
-        // 拆成两段没有任何意义，反而会让这一小节变成「中途变过 BPM」而不能在格子里改。
+        // 拆成两段没有任何意义，只会让节奏刻度多一次无意义的断点。
         if (Math.abs(newBl - bl) > 1e-6) {
           // 优先用显式 resetBeats；没有就用变更点的实际时间反推落在第几拍
           let r = inh.resetBeats > 0 ? inh.resetBeats : (changeAt - start) / bl
@@ -220,11 +220,13 @@ export function measureBeatLayout(m: MeasureInfo): MeasureBeatLayout {
      * 拍长按「小节实际时长 ÷ 拍数」均分，而不是一律用 m.beatLength。
      *
      * 红线可能把小节截断/延长十几毫秒（osu 的 offset 是整数毫秒，而
-     * 428.571429ms/拍 这类 BPM 算出来的边界带小数）。正文解析器是按
-     * 「区域时长 ÷ 时值单位数」均分的，格子这边必须用同一套，
-     * 否则同一个小节里「格子的位置」和「token 的位置」会差几毫秒：
-     * 点最后一格写出来的音符会掉回前一格，整小节还会因为「音符不在格子上」而拒绝编辑。
+     * 428.571429ms/拍 这类 BPM 算出来的边界带小数）。没有中途变速时，正文解析器
+     * 也是按「区域时长 ÷ 时值单位数」均分的，格子这边必须用同一套，
+     * 否则点最后一格写出来的音符会掉回前一格、整小节还会因为「音符不在格子上」拒绝编辑。
      * 完整小节（span === meter × beatLength）算出来仍是原拍长，行为不变。
+     *
+     * 中途变速（segments）时正文解析器改走 beatTimeOf（见 body.ts 的 place），
+     * 和这里逐拍推进的 times/lengths 是同一套拍位算法。
      */
     const slot = span > 0 ? span / n : bl
     for (let b = 0; b < n; b++) {

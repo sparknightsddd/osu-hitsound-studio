@@ -358,12 +358,28 @@ body.row-resizing * {
 .tab .x:hover {
   background: var(--border-strong);
 }
-/* 未保存标记：常驻显示（不靠 hover），点一下就是保存 */
+/* 未保存标记：常驻显示圆点；鼠标移到标签上时换成 ×，点下去才会关（并问是否保存） */
 .tab .x.dirty {
   opacity: 1;
   color: var(--accent);
-  font-size: 11px;
-  line-height: 1;
+}
+.tab .x .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.tab .x.dirty > svg {
+  display: none;
+}
+.tab:hover .x.dirty {
+  color: var(--text-dim);
+}
+.tab:hover .x.dirty > .dot {
+  display: none;
+}
+.tab:hover .x.dirty > svg {
+  display: block;
 }
 .tab .x.dirty:hover {
   background: var(--hover);
@@ -1275,7 +1291,7 @@ svg.i.fill {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .si-code-input {
-  width: 62px;
+  width: 78px;
   padding: 3px 4px;
   text-align: center;
   font-family: var(--mono);
@@ -2031,6 +2047,136 @@ svg.i.fill {
   flex: 1;
   color: var(--warn);
 }
+
+/* ---------- 格子视图 · 音效设置弹窗 ---------- */
+.gd-def-dlg {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(540px, 92vw);
+  max-height: min(84vh, 620px);
+  padding: 14px 16px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--bg);
+  box-shadow: var(--shadow);
+  overflow: auto;
+}
+.gd-def-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.gd-def-head .hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gd-def-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-height: 46px;
+  max-height: 200px;
+  overflow: auto;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-alt);
+}
+.gd-def-row {
+  display: grid;
+  grid-template-columns: 8px 44px minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.gd-def-row:hover {
+  background: var(--hover);
+}
+.gd-def-row.on {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.gd-def-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.gd-def-code {
+  font-size: 12px;
+  font-weight: 600;
+}
+.gd-def-slots {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gd-def-play {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 10px;
+  cursor: pointer;
+}
+.gd-def-play:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.gd-def-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gd-def-name label {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.gd-def-name .hint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gd-def-color {
+  width: 86px;
+  text-align: left;
+}
+.gd-def-slotgrid {
+  padding: 0;
+}
+.gd-def-slotgrid .as-cell {
+  min-height: 24px;
+}
+.gd-def-tip {
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+.gd-def-empty {
+  padding: 8px 6px;
+}
+/* 这个弹窗的底部提示是常态说明，不用音量弹窗那种警告色 */
+.gd-def-dlg .gd-vol-foot .hint {
+  color: var(--text-dim);
+}
+.gd-def-dlg .gd-vol-foot .hint.si-err {
+  color: var(--danger);
+}
 .gd-toolbar {
   flex-wrap: wrap;
   row-gap: 4px;
@@ -2391,16 +2537,56 @@ svg.i.fill {
   color: var(--text);
   font-size: 11.5px;
 }
+/* 88 键整台键盘：外面一层滚动容器，两侧 ◀▶ 只挪视野 */
+.gd-piano-wrap {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex: 1 1 420px;
+  min-width: 240px;
+  max-width: 780px;
+}
+.gd-piano-nav {
+  flex: none;
+  width: 15px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-size: 8px;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+}
+.gd-piano-nav:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.gd-piano-nav:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
 .gd-piano {
   position: relative;
-  flex: 0 1 460px;
-  min-width: 236px;
+  flex: 1 1 auto;
+  min-width: 0;
   height: 42px;
   border: 1px solid var(--border-strong);
   border-radius: 4px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   background: var(--bg);
   user-select: none;
+  scrollbar-width: none;
+}
+.gd-piano::-webkit-scrollbar {
+  height: 0;
+}
+.gd-piano-inner {
+  position: relative;
+  height: 100%;
 }
 .gd-pkey {
   position: absolute;
@@ -2444,18 +2630,36 @@ svg.i.fill {
 .gd-pkey.root {
   box-shadow: inset 0 -3px 0 var(--accent);
 }
+/* 当前输入八度（按 A~L 会落在这 12 个键上） */
+.gd-pkey.white.in-oct {
+  background: #e9f0ff;
+  box-shadow: inset 0 -2px 0 #c9d8ff;
+}
+.gd-pkey.black.in-oct {
+  background: #3a4a66;
+}
+/* 快捷键（A~L）落笔范围的框：盖在琴键上但只画边，不吃鼠标 */
+.gd-piano-oct {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 4;
+  border: 1.5px solid var(--accent);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, #000 25%, transparent),
+    inset 0 0 5px color-mix(in srgb, var(--accent) 28%, transparent);
+  pointer-events: none;
+}
 .gd-pkey-name {
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: 8.5px;
   font-weight: 600;
+  pointer-events: none;
 }
-.gd-pkey-key {
-  font-family: var(--mono);
+.gd-pkey.black .gd-pkey-name {
   font-size: 8px;
-  opacity: 0.5;
-}
-.gd-pkey.black .gd-pkey-key {
-  opacity: 0.65;
 }
 .gd-brush {
   position: relative;

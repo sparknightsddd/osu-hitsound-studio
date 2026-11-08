@@ -38,7 +38,7 @@ hitsound normal-hitfinish|soft-hitfinish{(1,5),(11,15)} Ni = "finish.ogg"
 hitsound sliderside = default.blank
 
 ## 定义乐句，@后面只能是字母和数字
-@Fill = /K (KK) (KKK) (KKKK)/
+@Fill = /K (K K) (K K K) (K K K K)/
 @Backbeat = /D - K -/
 
 ## keysound（有音高的音效）：每个音高一个 wav，模板里用 <loop()> 列音名、<int()> 算八度
@@ -62,7 +62,7 @@ keysound custom guitar = "guitar.sf2"      ## 音色库模式（暂不支持解�
 
 [Hitsound]
 ## 每行以 / 开头，两个 / 之间是一个小节
-/D D K (DD) (DD) (DD) K -/
+/D D K (D D) (D D) (D D) K -/
 /@Backbeat/ D D K K/
 //K*16/
 /[@Fill] [@Fill]/

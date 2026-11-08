@@ -1,13 +1,12 @@
 import { useStore } from '../store'
 import { IconClose } from './Icons'
-import { saveActive } from '../core/actions'
+import { closeChart } from '../core/actions'
 import { t } from '../i18n'
 
 export default function TabsBar() {
   const files = useStore((s) => s.files)
   const activeId = useStore((s) => s.activeId)
   const setActive = useStore((s) => s.setActive)
-  const closeFile = useStore((s) => s.closeFile)
   return (
     <div className="tabs">
       {files.map((f) => (
@@ -18,29 +17,21 @@ export default function TabsBar() {
           title={f.path ? `${f.path}${f.dirty ? t('（有未保存改动）') : ''}` : f.name}
         >
           <span className="name">{f.name}</span>
-          {/* 未保存标记：点关闭按钮会换成"要保存吗"的圆点 */}
-          {f.dirty ? (
-            <button
-              className="x dirty"
-              title={t('有未保存改动，点击保存')}
-              onClick={(e) => {
-                e.stopPropagation()
-                void saveActive(false)
-              }}
-            >
-              ●
-            </button>
-          ) : (
-            <button
-              className="x"
-              onClick={(e) => {
-                e.stopPropagation()
-                closeFile(f.id)
-              }}
-            >
-              <IconClose className="sm" />
-            </button>
-          )}
+          {/*
+            未保存时显示圆点（和 VSCode 一样），鼠标移到标签上再变成 ×。
+            两种状态点下去都是「关闭」，有改动会问 保存 / 不保存 / 取消。
+          */}
+          <button
+            className={`x${f.dirty ? ' dirty' : ''}`}
+            title={f.dirty ? t('有未保存改动，点击关闭时会问是否保存') : t('关闭')}
+            onClick={(e) => {
+              e.stopPropagation()
+              void closeChart(f.id)
+            }}
+          >
+            {f.dirty ? <i className="dot" /> : null}
+            <IconClose className="sm" />
+          </button>
         </div>
       ))}
     </div>

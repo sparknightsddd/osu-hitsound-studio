@@ -123,7 +123,7 @@ const before = await ev(`(() => {
 })()`)
 const B = JSON.parse(before)
 console.log('BEFORE', JSON.stringify({ opts: B.opts, brushes: B.names.length }))
-T('下拉框有 Hitsound + 两个 keysound 乐器', B.opts.length === 3 && B.opts[0] === ':Hitsound', B.opts.join(' | '))
+T('下拉框有 Hitsound + 两个 keysound 乐器 + 音效设置', B.opts.length === 4 && B.opts[0] === ':Hitsound' && B.opts[3] === '@define:音效设置', B.opts.join(' | '))
 T('默认是 Hitsound 模式（显示音效圆按钮）', B.names.length === 1, B.names.join(','))
 
 // 切到 piano
@@ -144,17 +144,77 @@ const piano = JSON.parse(
       white: keys.filter((k) => k.classList.contains('white')).length,
       black: keys.filter((k) => k.classList.contains('black')).length,
       names: keys.map((k) => k.querySelector('.gd-pkey-name')?.textContent || ''),
-      inputs: keys.map((k) => k.querySelector('.gd-pkey-key')?.textContent || ''),
       brushes: document.querySelectorAll('.gd-brush').length,
       cells: [...document.querySelectorAll('.gd-cell')].slice(0, 8).map((c) => c.querySelector('.gd-label')?.textContent || ''),
     })
   })()`),
 )
 console.log('PIANO', JSON.stringify(piano))
-T('切到 piano 后出现 12 个琴键', piano.total === 12, String(piano.total))
-T('7 白键 + 5 黑键', piano.white === 7 && piano.black === 5, `${piano.white}/${piano.black}`)
-T('音名带八度、黑键用 H I J K L', piano.names.join(' ') === 'C4 H4 D4 I4 E4 F4 J4 G4 K4 A4 L4 B4', piano.names.join(' '))
-T('每个键的角标就是音名代号', piano.inputs.join('') === 'CHDIEFJGKALB', piano.inputs.join(''))
+T('钢琴键盘是整台 88 键（A0–C8）', piano.total === 88, String(piano.total))
+T('52 白键 + 36 黑键', piano.white === 52 && piano.black === 36, `${piano.white}/${piano.black}`)
+T(
+  '只有 C 键标八度音名（C1–C8）',
+  piano.names.filter((n) => /^C\d+$/.test(n)).join(' ') === 'C1 C2 C3 C4 C5 C6 C7 C8',
+  piano.names.filter((n) => /^C\d+$/.test(n)).join(' '),
+)
+
+/** 当前八度那 12 个键（in-oct）、它们的位置、以及外面的高亮框 */
+const octState = async () =>
+  JSON.parse(
+    await ev(`(() => {
+      const rect = (el) => {
+        if (!el) return null
+        const r = el.getBoundingClientRect()
+        return { left: Math.round(r.left * 10) / 10, right: Math.round(r.right * 10) / 10 }
+      }
+      const keys = [...document.querySelectorAll('.gd-pkey')]
+      const inOct = keys.filter((k) => k.classList.contains('in-oct'))
+      const f = document.querySelector('.gd-piano-oct')
+      const nav = [...document.querySelectorAll('.gd-piano-nav')]
+      const el = document.querySelector('.gd-piano')
+      return JSON.stringify({
+        inOct: inOct.length,
+        midis: inOct.map((k) => Number(k.dataset.midi)),
+        labels: inOct.map((k) => k.textContent),
+        frame: rect(f),
+        c60: rect(document.querySelector('.gd-pkey[data-midi="60"]')),
+        c72: rect(document.querySelector('.gd-pkey[data-midi="72"]')),
+        c84: rect(document.querySelector('.gd-pkey[data-midi="84"]')),
+        scroll: el ? el.scrollLeft : -1,
+        scrollMax: el ? el.scrollWidth - el.clientWidth : -1,
+        navCount: nav.length,
+      })
+    })()`),
+  )
+
+let oct = await octState()
+T(
+  '当前八度 12 个键都标了输入字母',
+  oct.inOct === 12 && oct.midis[0] === 60 && oct.midis[11] === 71 && oct.labels.slice(1).join('') === 'HDIEFJGKALB',
+  `${oct.midis[0]}–${oct.midis[11]} / ${oct.labels.join('')}`,
+)
+T(
+  '当前八度外面有高亮框，左右边缘贴着 C4/C5',
+  !!oct.frame && Math.abs(oct.frame.left - oct.c60.left) <= 2 && Math.abs(oct.frame.right - oct.c72.left) <= 2,
+  `frame ${JSON.stringify(oct.frame)} · C4 ${JSON.stringify(oct.c60)} · C5 ${JSON.stringify(oct.c72)}`,
+)
+T('88 键放不下时提供 ◀▶ 滚动按钮', oct.navCount === 2 && oct.scrollMax > 0, `${oct.navCount} / max ${oct.scrollMax}`)
+
+// ▶ 只挪视野，不改输入八度
+const navBefore = (await octState()).scroll
+await ev(`document.querySelectorAll('.gd-piano-nav')[1].click()`)
+await wait(900)
+const afterNav = await octState()
+T(
+  '▶ 把键盘往右滚，但不改输入八度',
+  afterNav.scroll > navBefore && afterNav.midis[0] === 60,
+  `scroll ${navBefore} → ${afterNav.scroll} · base ${afterNav.midis[0]}`,
+)
+T(
+  '滚动后高亮框跟着琴键一起走',
+  Math.abs(afterNav.frame.left - afterNav.c60.left) <= 2 && Math.abs(afterNav.frame.right - afterNav.c72.left) <= 2,
+  `frame ${JSON.stringify(afterNav.frame)}`,
+)
 T('钢琴模式下不再显示音效圆按钮', piano.brushes === 0, String(piano.brushes))
 T('格子里显示已有的 keysound 音名（每个音占 4 格）', piano.cells.slice(0, 5).join('|') === 'C4||||D4', piano.cells.join('|'))
 
@@ -222,8 +282,17 @@ T('再按一次 B 取消 B4', !/4B/.test(txt.ks), txt.ks.split('\n').slice(-2).j
 
 // 数字换八度：5 → C5，点第 5 格按 A
 await key('5')
-const keysAfter5 = JSON.parse(await ev(`JSON.stringify([...document.querySelectorAll('.gd-pkey-name')].map((n) => n.textContent))`))
-T('按 5 把输入范围换到第 5 八度', keysAfter5[0] === 'C5', keysAfter5.join(' '))
+const oct5 = await octState()
+T(
+  '按 5 把输入范围换到第 5 八度',
+  oct5.inOct === 12 && oct5.midis[0] === 72 && oct5.midis[11] === 83,
+  `${oct5.midis[0]}–${oct5.midis[11]}`,
+)
+T(
+  '按 5 后高亮框跟着移到 C5',
+  Math.abs(oct5.frame.left - oct5.c72.left) <= 2 && Math.abs(oct5.frame.right - oct5.c84.left) <= 2,
+  `frame ${JSON.stringify(oct5.frame)} · C5 ${JSON.stringify(oct5.c72)} · C6 ${JSON.stringify(oct5.c84)}`,
+)
 await clickCell(4)
 await key('a')
 txt = await ksText()
@@ -234,17 +303,23 @@ await key('ArrowRight', { ctrl: true })
 txt = await ksText()
 T('选中时 Ctrl+→ 把 A5 移成 L5', /5L/.test(txt.ks) && !/5A/.test(txt.ks), txt.ks.split('\n').slice(-2).join(' / '))
 
-// Esc 取消选区 → Ctrl+→ 移动输入范围（半音）
+// Esc 取消选区 → Ctrl+→ 只滚动视野（快捷键音高不变）
 await key('Escape')
 await ev(`document.querySelector('.gd-wrap').focus()`)
+await wait(600)
+const scrollBefore = (await octState()).scroll
 await key('ArrowRight', { ctrl: true })
-const keysAfterRange = JSON.parse(await ev(`JSON.stringify([...document.querySelectorAll('.gd-pkey-name')].map((n) => n.textContent))`))
-T('没选区时 Ctrl+→ 把输入范围移半音（C5 → H5）', keysAfterRange[0] === 'H5', keysAfterRange.join(' '))
+const afterScroll = await octState()
+T(
+  '没选区时 Ctrl+→ 只滚动键盘，输入八度还是 C5',
+  afterScroll.midis[0] === 72 && afterScroll.scroll > scrollBefore,
+  `scroll ${scrollBefore} → ${afterScroll.scroll} · base ${afterScroll.midis[0]}`,
+)
 
-// 点钢琴键 D5 落笔
+// 点钢琴键 D5 落笔（88 键里按 data-midi 找，别按音名找）
 await clickCell(5)
 await ev(`(() => {
-  const k = [...document.querySelectorAll('.gd-pkey')].find((x) => x.querySelector('.gd-pkey-name')?.textContent === 'D5')
+  const k = document.querySelector('.gd-pkey[data-midi="74"]')
   k.click()
   return 'ok'
 })()`)

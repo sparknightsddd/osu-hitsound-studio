@@ -101,6 +101,11 @@ export function planSoundBundle(doc: ChartDoc, chartPath: string): BundlePlan {
 
   /** 行号（1 起）→ 新的文件名 */
   const byLine = new Map<number, string>()
+  /**
+   * 已占用的文件名（小写）。代号区分大小写，但 Windows 文件系统不区分：
+   * `a` 和 `A` 不能都叫 `a.wav`，撞上就加 `_2`、`_3` 后缀。
+   */
+  const usedFile = new Set<string>()
   for (const h of doc.hitsounds) {
     if (!h.name) continue
     if (h.defaultRef) continue // 内置 default.xxx，没有实体文件
@@ -114,7 +119,14 @@ export function planSoundBundle(doc: ChartDoc, chartPath: string): BundlePlan {
       plan.skips.push({ code: h.name, reason: '[Define] 里没有可解析的文件路径' })
       continue
     }
-    const fileName = `${h.name}${extOf(src)}`
+    const ext = extOf(src)
+    let fileName = `${h.name}${ext}`
+    if (usedFile.has(fileName.toLowerCase())) {
+      let n = 2
+      while (usedFile.has(`${h.name}_${n}${ext}`.toLowerCase())) n++
+      fileName = `${h.name}_${n}${ext}`
+    }
+    usedFile.add(fileName.toLowerCase())
     const to = joinDir(targetDir, fileName)
     if (!samePath(src, to)) plan.copies.push({ code: h.name, from: diskPath(src), to, fileName })
     byLine.set(h.line, fileName)

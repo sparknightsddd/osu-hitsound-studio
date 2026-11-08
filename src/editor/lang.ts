@@ -87,8 +87,9 @@ const musictxt = StreamLanguage.define<St>({
         stream.match(/^[A-Za-z0-9_]*/)
         return 'phraseName'
       }
-      if (ch >= 'A' && ch <= 'Z') {
-        stream.match(/^[A-Z][a-z]*/)
+      if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) {
+        // 代号大小写不限，一整段连续字母就是一个代号
+        stream.match(/^[A-Za-z]+/)
         return 'note'
       }
       if (ch >= '0' && ch <= '9') {
@@ -149,7 +150,10 @@ const musictxt = StreamLanguage.define<St>({
       }
       if (stream.match(/^"[^"]*"?/)) return 'string'
       if (stream.match(/^'[^']*'?/)) return 'string'
-      if (ch >= 'A' && ch <= 'Z' && stream.match(/^[A-Z][a-z]*/)) return 'noteDef'
+      if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) {
+        stream.match(/^[A-Za-z]+/)
+        return 'noteDef'
+      }
       if (stream.match(/^-?\d+(\.\d+)?/)) return 'number'
       stream.next()
       return null

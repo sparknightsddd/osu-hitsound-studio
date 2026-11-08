@@ -10,6 +10,7 @@
  */
 import type { SoundCode } from './osuSounds'
 import { soundCodeKey } from './osuSounds'
+import { isCodeName, normalizeCodeInput } from './codes'
 
 export const COMBO_SETS = ['soft', 'normal', 'drum'] as const
 export const COMBO_HITS = ['hitnormal', 'hitwhistle', 'hitfinish', 'hitclap'] as const
@@ -88,12 +89,10 @@ export function splitTokens(raw: string): string[] {
     .filter(Boolean)
 }
 
-/** 规整一个 token：`=` 原样保留，其余按代号规则（首字母大写、其余小写、只留字母） */
+/** 规整一个 token：`=` 原样保留，其余按代号规则（只留字母、大小写原样；单个数字/符号转成 One / Slash） */
 export function normalizeToken(t: string): string {
   if (t === '=') return '='
-  const letters = t.replace(/[^A-Za-z]/g, '')
-  if (!letters) return ''
-  return letters[0].toUpperCase() + letters.slice(1).toLowerCase()
+  return normalizeCodeInput(t)
 }
 
 export function normalizePrefLine(raw: string): string {
@@ -105,7 +104,7 @@ export function normalizePrefLine(raw: string): string {
 
 /** 一行里的非法 token（用于设置界面的校验） */
 export function invalidTokens(raw: string): string[] {
-  return splitTokens(raw).filter((t) => t !== '=' && !/^[A-Z][a-z]*$/.test(normalizeToken(t)))
+  return splitTokens(raw).filter((t) => t !== '=' && !isCodeName(normalizeToken(t)))
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +201,48 @@ export function planDefaultColors(
 
 export function comboOf(c: SoundCode): ComboKey {
   return `${c.sampleSet}-${c.hitType}` as ComboKey
+}
+
+
+/** 给每行配默认代号：先用设置里的预置，再补 Aa、Ab、Ac…（白板跳过） */
+export function buildDefaultNames(
+  rows: { key: string }[],
+  wb: string,
+  preset: Record<string, string> = {},
+): Record<string, string> {
+  const used = new Set<string>()
+  const out: Record<string, string> = {}
+  for (const r of rows) {
+    if (r.key === wb) {
+      out[r.key] = ''
+      continue
+    }
+    const p = preset[r.key]
+    if (p && !used.has(p)) {
+      out[r.key] = p
+      used.add(p)
+    }
+  }
+  let a = 0
+  let b = 0
+  for (const r of rows) {
+    if (r.key === wb) continue
+    if (out[r.key] !== undefined) continue
+    for (;;) {
+      const n = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[a] + 'abcdefghijklmnopqrstuvwxyz'[b]
+      b++
+      if (b > 25) {
+        b = 0
+        a = (a + 1) % 26
+      }
+      if (!used.has(n)) {
+        used.add(n)
+        out[r.key] = n
+        break
+      }
+    }
+  }
+  return out
 }
 
 /**

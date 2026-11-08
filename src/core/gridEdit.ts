@@ -421,9 +421,6 @@ function collectSlots(doc: ChartDoc, mi: number, div: number, target: GridEditTa
   const staff = target.staff ?? 0
   const m = doc.measures[mi]
   if (!m) return { ok: false, reason: '小节不存在' }
-  if (m.segments && m.segments.length > 1) {
-    return { ok: false, reason: '这一小节中途变过 BPM，格子暂不支持写回' }
-  }
   const beats = measureBeatTimes(m).length
   if (!beats) return { ok: false, reason: '这一小节没有可用的拍点（检查 [Timing]）' }
 

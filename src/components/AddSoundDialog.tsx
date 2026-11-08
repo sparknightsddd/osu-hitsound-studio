@@ -7,12 +7,13 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import { normalizeSoundName } from './SoundImportDialog'
 import { parseColorToken } from '../core/colors'
+import { isCodeName } from '../core/codes'
 import { t } from '../i18n'
 
 export interface AddSoundPlan {
   /** 选中的槽位（可能为空 → 调用方写 custom） */
   slots: string[]
-  /** 代号（大写开头 + 小写字母） */
+  /** 代号（英文字母，大小写不限） */
   name: string
   /** 可选颜色，已归一化成 #rrggbb；没填就是 undefined（用默认色） */
   color?: string
@@ -119,7 +120,7 @@ export default function AddSoundDialog() {
    * 槽位映射和配色都保留下来。
    */
   const changeName = (raw: string) => {
-    const next = normalizeSoundName(raw).slice(0, 4)
+    const next = normalizeSoundName(raw)
     setName(next)
     const old = next ? opts.existing[next] : undefined
     if (!slotsTouched.current) setSlots(old?.slots ?? [])
@@ -131,7 +132,7 @@ export default function AddSoundDialog() {
   // 那样和输入框里的灰字提示叠在一起容易让人以为填过了。
   const color = parseColorToken(colorText)
   let error = ''
-  if (nm && !/^[A-Z][a-z]*$/.test(nm)) error = t('代号只能是大写字母开头 + 小写字母')
+  if (nm && !isCodeName(nm)) error = t('代号只能用英文字母，大小写不限')
   else if (colorText.trim() && !color) error = t('颜色看不懂：写 #RRGGBB 或 red / green / blue…')
   const canOk = !!nm && !error
   /** 这个代号已经用过：确认后是替换，不是新加 */
@@ -196,11 +197,11 @@ export default function AddSoundDialog() {
             className="si-code-input mono"
             value={name}
             placeholder=""
-            maxLength={4}
+            maxLength={16}
             spellCheck={false}
             onChange={(e) => changeName(e.target.value)}
           />
-          <span className="hint">{t('大写字母开头，后面只能是小写字母')}</span>
+          <span className="hint">{t('字母大小写不限；数字/符号写成 One / Slash 这样的名字（网格里显示 1、/）')}</span>
         </div>
 
         <div className="as-name">

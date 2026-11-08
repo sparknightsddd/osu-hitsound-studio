@@ -152,7 +152,7 @@ export default function Editor(props: Props) {
       if (sectionAt(text, head) !== 'hitsound') return
       const line = view.state.doc.lineAt(head)
       const before = line.text.slice(0, head - line.from)
-      const m = /([A-Z][a-z]*)$/.exec(before)
+      const m = /([A-Za-z]+)$/.exec(before)
       if (!m) return
       const name = m[1]
       if (name === lastTyped.current) return

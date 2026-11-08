@@ -17,6 +17,7 @@
  * 右键 / Ctrl+Z X C V A 走一套自己的编辑命令（文本编辑器的同类快捷键仍由 CodeMirror 处理）。
  */
 import {
+  Fragment,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -25,10 +26,15 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from 'react'
-import type { ChartDoc, NoteEvent, SectionMark } from '../core/types'
+import type { ChartDoc, HitsoundDef, NoteEvent, SectionMark } from '../core/types'
+
+/** 钢琴键盘的键宽（px）：88 键整台铺开，窗口放不下就横向滚动 */
+const PIANO_WHITE_W = 22
+const PIANO_BLACK_W = 13
+
 import { measureTicks } from '../core/measures'
 import { rhythmPalette, tickPriority, withAlpha, readableOn, PRIORITY_ALPHA, type Priority } from '../core/rhythmColors'
-import { alphaForVolume } from '../core/colors'
+import { alphaForVolume, parseColorToken } from '../core/colors'
 import { getDisplayPrefs } from '../core/displayPrefs'
 import { engine } from '../audio/engine'
 import { useStore } from '../store'
@@ -58,11 +64,20 @@ import { getGridClip, setGridClip, hasGridClip, type ClipCell, type GridClip } f
 import { writeClipboard } from '../core/clipboard'
 import { openEditMenu, type EditMenuItem } from './EditMenu'
 import { openExternalUrl } from '../core/desktop'
+import { SLOT_HITS, SLOT_SETS } from '../core/soundSlots'
+import { countHitsoundRefs } from '../core/defineEdit'
 import { fmtOsuTime, osuEditUrl } from '../core/time'
 import { updateSectionsText } from '../core/sections'
+import {
+  codeGlyph,
+  codeGlyphs,
+  codeNameFromKey,
+  isCodeName,
+  normalizeCodeInput,
+} from '../core/codes'
 import { desktopApi } from '../core/desktop'
 import { parseOsuTimeline, type OsuTimelineObject } from '../core/osuObjects'
-import { copySoundToOtherChart } from '../core/actions'
+import { copySoundToOtherChart, editHitsoundDefine } from '../core/actions'
 import SectionBand from './SectionBand'
 import { t as tr } from '../i18n'
 
@@ -382,16 +397,204 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
     if (ksInst && !ksOptions.some((o) => `${o.staff}:${o.name}` === ksInst)) setKsInst('')
   }, [ksInst, ksOptions, setKsInst])
 
-  /** A~L 对应的 12 个键（含八度、黑键标记） */
-  const pianoKeys = useMemo(
-    () =>
-      Array.from({ length: 12 }, (_, i) => {
-        const midi = ksBase + i
-        // 角标就是「按哪个字母」：音名本身（C H D I E F J G K A L B）
-        return { i, midi, name: midiToName(midi), black: isBlackKey(midi), key: semiToLetter(i) }
-      }),
-    [ksBase],
+  /** 音效设置里列出的定义：只列 hitsound（keysound 走上面的乐器下拉） */
+  const hsDefs = useMemo(
+    () => doc.hitsounds.filter((h): h is HitsoundDef & { name: string } => h.kind === 'hitsound' && !!h.name),
+    [doc],
   )
+
+  /** 一条定义占用的槽位（custom 就是空数组） */
+  const slotsOfDef = (h: HitsoundDef): string[] =>
+    h.alts.filter((a) => !a.custom && a.sampleSet && a.hitType).map((a) => `${a.sampleSet}-${a.hitType}`)
+
+  /** 音效设置弹窗：sel = 正在编辑哪一条（原代号） */
+  const [defDlg, setDefDlg] = useState<{
+    sel: string
+    name: string
+    slots: string[]
+    /** 颜色输入框的内容（'' = 默认色） */
+    color: string
+  } | null>(null)
+  const [defMsg, setDefMsg] = useState('')
+
+  const openDefSettings = () => {
+    const first = hsDefs[0]
+    setDefMsg('')
+    setDefDlg(
+      first
+        ? { sel: first.name, name: first.name, slots: slotsOfDef(first), color: first.color?.toUpperCase() || '' }
+        : { sel: '', name: '', slots: [], color: '' },
+    )
+  }
+
+  const pickDef = (h: HitsoundDef) => {
+    if (!h.name) return
+    setDefMsg('')
+    setDefDlg({ sel: h.name, name: h.name, slots: slotsOfDef(h), color: h.color?.toUpperCase() || '' })
+  }
+
+  const toggleDefSlot = (slot: string) => {
+    setDefMsg('')
+    setDefDlg((d) =>
+      d ? { ...d, slots: d.slots.includes(slot) ? d.slots.filter((x) => x !== slot) : [...d.slots, slot] } : d,
+    )
+  }
+
+  /** 试听：绑定过的样本直接播；`default.xxx` 走内置 wav */
+  const previewDef = async (h: HitsoundDef) => {
+    setDefMsg('')
+    if (h.defaultRef) {
+      const ok = await engine.previewDefault(h.defaultRef)
+      if (!ok) setDefMsg(tr('这个代号还没有绑定音频文件，去「音效库」选一个'))
+      return
+    }
+    if (h.name && !engine.playSample(h.name, 100))
+      setDefMsg(tr('这个代号还没有绑定音频文件，去「音效库」选一个'))
+  }
+
+  /** 正文里这个代号出现了多少次（改名前先让人看见影响范围） */
+  const defRefs = useMemo(() => countHitsoundRefs(doc, defDlg?.sel || ''), [doc, defDlg?.sel])
+
+  const defNextName = (defDlg?.name ?? '').trim()
+  const defDup = !!defDlg && defNextName !== defDlg.sel && hsDefs.some((h) => h.name === defNextName)
+  const defNameOk = isCodeName(defNextName)
+  const defColorText = (defDlg?.color ?? '').trim()
+  const defColor = defColorText ? parseColorToken(defColorText) : null
+  const defColorOk = !defColorText || !!defColor
+  const defCanApply = !!defDlg?.sel && defNameOk && !defDup && defColorOk
+
+  const applyDefEdit = () => {
+    if (!defDlg?.sel || !defCanApply) return
+    const res = editHitsoundDefine(defDlg.sel, {
+      name: defNextName,
+      slots: defDlg.slots,
+      // '' 表示把颜色删掉（回到默认色）
+      color: defColorText ? defColorText : null,
+    })
+    if (!res.ok) {
+      setDefMsg(res.error || tr('修改失败'))
+      return
+    }
+    // 双击型正锁着旧代号的话，跟着改名，别让画笔失效
+    if (defNextName !== defDlg.sel && brushPin === defDlg.sel) setBrushPin(defNextName)
+    setDefDlg({
+      sel: defNextName,
+      name: defNextName,
+      slots: defDlg.slots,
+      color: defColor ? defColor.toUpperCase() : '',
+    })
+    setDefMsg(
+      res.changes
+        ? tr('已更新 {name}：正文同步了 {n} 处', { name: defNextName, n: res.changes })
+        : tr('已更新 {name}', { name: defNextName }),
+    )
+  }
+
+  /** Esc 关掉音效设置弹窗（捕获阶段，别让网格的键盘处理抢走） */
+  useEffect(() => {
+    if (!defDlg) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      setDefDlg(null)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [defDlg])
+
+  /**
+   * 整台 88 键（A0–C8）：白键固定宽度，窗口放不下就横向滚动。
+   * `whiteIndex` 用来把当前八度滚进视野。
+   */
+  const pianoKeys = useMemo(() => {
+    const list: {
+      midi: number
+      name: string
+      black: boolean
+      key: string
+      left: number
+      width: number
+      whiteIndex: number
+    }[] = []
+    let wi = 0
+    for (let midi = PIANO_LOW; midi <= PIANO_HIGH; midi++) {
+      const black = isBlackKey(midi)
+      const pc = ((midi % 12) + 12) % 12
+      list.push({
+        midi,
+        name: midiToName(midi),
+        black,
+        // A~L 直接绑音名：C H D I E F J G K A L B
+        key: semiToLetter(pc),
+        whiteIndex: wi,
+        left: black ? wi * PIANO_WHITE_W - PIANO_BLACK_W / 2 : wi * PIANO_WHITE_W,
+        width: black ? PIANO_BLACK_W : PIANO_WHITE_W,
+      })
+      if (!black) wi++
+    }
+    return { list, width: wi * PIANO_WHITE_W, whiteCount: wi }
+  }, [])
+
+  /** 某个 MIDI 前面有几个白键（滚动定位用） */
+  const pianoWhiteIndex = (midi: number): number => {
+    const k = pianoKeys.list.find((x) => x.midi === midi)
+    return k ? k.whiteIndex : 0
+  }
+
+  /**
+   * 快捷键输入范围的框：当前八度 C → 下一个 C 的左边缘。
+   * 用白键序号算宽度，黑键跨在白键缝上也不会偏。
+   */
+  const octLo = Math.max(PIANO_LOW, Math.min(PIANO_HIGH, ksBase))
+  const octLeft = pianoWhiteIndex(octLo) * PIANO_WHITE_W
+  const octRight =
+    octLo + 12 <= PIANO_HIGH ? pianoWhiteIndex(octLo + 12) * PIANO_WHITE_W : pianoKeys.width
+  const octWidth = Math.max(PIANO_WHITE_W, octRight - octLeft)
+
+  const pianoRef = useRef<HTMLDivElement>(null)
+  const [pianoNav, setPianoNav] = useState({ left: false, right: false })
+
+  const syncPianoNav = () => {
+    const el = pianoRef.current
+    if (!el) return
+    const max = el.scrollWidth - el.clientWidth
+    setPianoNav({ left: el.scrollLeft > 1, right: max > 1 && el.scrollLeft < max - 1 })
+  }
+
+  useEffect(() => {
+    syncPianoNav()
+    const onResize = () => syncPianoNav()
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [ksSel])
+
+  /** ◀▶ / Ctrl+←→：滚动可见区域（只动视野，不改音高） */
+  const scrollPiano = (dir: -1 | 1) => {
+    const el = pianoRef.current
+    if (!el) return
+    const max = Math.max(0, el.scrollWidth - el.clientWidth)
+    el.scrollLeft = Math.max(0, Math.min(max, el.scrollLeft + dir * PIANO_WHITE_W * 7))
+  }
+
+  /** 换八度 / 切到钢琴模式：把这一组 12 个键滚进视野（用户手动滚走后不硬拉回来） */
+  useEffect(() => {
+    const el = pianoRef.current
+    if (!el || !ksSel) return
+    const x = pianoWhiteIndex(ksBase) * PIANO_WHITE_W
+    const w = 7 * PIANO_WHITE_W
+    if (x >= el.scrollLeft - 2 && x + w <= el.scrollLeft + el.clientWidth + 2) return
+    el.scrollLeft = Math.max(0, x - (el.clientWidth - w) / 2)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ksBase, ksSel])
+
+  /** 点琴键：落笔，并把这组八度设成当前输入八度（之后按 A~L 就在同一八度） */
+  const pickPianoKey = (midi: number) => {
+    const pc = ((midi % 12) + 12) % 12
+    const start = midi - pc
+    if (start >= 24 && start <= PIANO_HIGH && start !== ksBase) setKsBase(start)
+    applyNote(midi)
+  }
 
   /** 每一格上的音效（键：`小节下标:格下标`） */
   const eventsByCell = useMemo(() => {
@@ -421,6 +624,9 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
           lo = mid + 1
         } else hi = mid - 1
       }
+      // osu 的时间是整数毫秒，拍点常带小数（92270.873 → 92270）。
+      // 落在下一格前 2ms 内的音符，显示也吸到下一格，和读格/写回的 Math.round 保持一致。
+      if (k + 1 < ticks.length && ticks[k + 1] - e.time <= SNAP_MS) k++
       push(mi, k, e)
     }
     return map
@@ -1568,17 +1774,21 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
   }
 
   /**
-   * 键盘敲代号：按 [Define] 里的代号前缀匹配，打全（或只剩一个候选、超时）就落到选中的格子。
-   * 单字母代号（Aa 不行，A 可以）敲一下就落笔；多字母代号连续敲完即可，
-   * 中间会按前缀过滤，底栏实时显示还剩哪些候选。
+   * 键盘敲代号：单键代号（52 字母 / 10 数字 / 符号）按一下直接落笔；
+   * 多字母代号仍按前缀匹配，打全或只剩一个候选/超时后落笔。
+   * 字母区分大小写（`a` 和 `A` 是两个代号）；前缀先按大小写匹配，
+   * 一个都没有时再退回大小写不敏感，兼容旧的 `Aa` 这类代号。
    */
   const typedRef = useRef('')
   const [typed, setTyped] = useState('')
   const typedTimer = useRef<number | null>(null)
-  const typedCands = useMemo(
-    () => (typed ? names.filter((n) => n.toLowerCase().startsWith(typed.toLowerCase())) : []),
-    [typed, names],
-  )
+
+  const matchPrefix = (buf: string) => {
+    const sensitive = names.filter((n) => n.startsWith(buf))
+    return sensitive.length ? sensitive : names.filter((n) => n.toLowerCase().startsWith(buf.toLowerCase()))
+  }
+
+  const typedCands = useMemo(() => (typed ? matchPrefix(typed) : []), [typed, names])
 
   const clearTyped = () => {
     typedRef.current = ''
@@ -1594,15 +1804,22 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
     applySoundToSelection(name)
   }
 
-  const typeLetter = (ch: string) => {
+  const typeCode = (ch: string) => {
     if (!names.length) return
-    const match = (buf: string) => names.filter((n) => n.toLowerCase().startsWith(buf.toLowerCase()))
+    const keyName = codeNameFromKey(ch)
+    if (!keyName) return
+    // 数字 / 符号：一个键就是一个完整的正文名（1 → One、/ → Slash），没有前缀可接
+    if (!/^[A-Za-z]$/.test(ch)) {
+      if (names.includes(keyName)) commitTyped(keyName)
+      else clearTyped()
+      return
+    }
     let buf = typedRef.current + ch
-    let cands = match(buf)
+    let cands = matchPrefix(buf)
     // 上一个字母已经接不上任何代号：把它丢掉，当前这个字母当成新的一次输入
     if (!cands.length && typedRef.current) {
       buf = ch
-      cands = match(buf)
+      cands = matchPrefix(buf)
     }
     if (!cands.length) {
       clearTyped()
@@ -1610,18 +1827,28 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
     }
     typedRef.current = buf
     setTyped(buf)
-    const exact = cands.find((n) => n.toLowerCase() === buf.toLowerCase())
-    if (exact) {
-      commitTyped(exact)
+    // 单键代号优先：完全同名的代号直接落笔（哪怕还有 Aa 这种更长的候选）。
+    // 多字母代号在「没有同名单键」时才靠继续敲字母来输入。
+    if (names.includes(buf)) {
+      commitTyped(buf)
+      return
+    }
+    // 兼容旧写法：Aa 可以敲 aa（前两个键大小写不敏感）
+    const ciExact =
+      buf.length > 1 ? cands.find((n) => n.toLowerCase() === buf.toLowerCase()) : undefined
+    if (ciExact) {
+      commitTyped(ciExact)
       return
     }
     if (typedTimer.current) window.clearTimeout(typedTimer.current)
     typedTimer.current = window.setTimeout(() => {
       typedTimer.current = null
       const cur = typedRef.current
-      const list = cur ? match(cur) : []
-      // 只剩一个候选就替用户补全；还有多个就放弃这次输入（避免误落笔）
-      if (list.length === 1) commitTyped(list[0])
+      const list = cur ? matchPrefix(cur) : []
+      const hit = list.find((n) => n === cur)
+      // 有完全同名的就落它；否则只剩一个候选才替用户补全，多个就放弃
+      if (hit) commitTyped(hit)
+      else if (list.length === 1) commitTyped(list[0])
       else clearTyped()
     }, TYPE_WAIT)
   }
@@ -2237,7 +2464,7 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
     // 单选一格、且有实体音频文件时：把音效带到另一份已打开的谱面
     copyableCodes.forEach((n, i) => {
       items.push({
-        label: tr('将音效 {name} 复制到其他谱面', { name: n }),
+        label: tr('将音效 {name} 复制到其他谱面', { name: codeGlyph(n) }),
         sep: i === 0,
         onClick: () => void copySoundToOtherChart(n),
       })
@@ -2277,8 +2504,8 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
         }
         if (/^[1-9]$/.test(e.key)) {
           e.preventDefault()
-          // 8/9 没有完整的 12 键范围（C8 是钢琴最高音），夹到 7
-          setKsBase((Math.min(7, Number(e.key)) + 1) * 12)
+          // 1–8 = C1–C8（9 夹到 8）；A0–B0 直接点琴键
+          setKsBase((Math.min(8, Number(e.key)) + 1) * 12)
           return
         }
         // keysound 模式下不接 hitsound 的代号输入
@@ -2289,18 +2516,21 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
         const delta =
           e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : e.key === 'ArrowUp' ? 12 : -12
         if (selCells.length) transposeSelection(delta)
-        else setKsBase(Math.max(PIANO_LOW, Math.min(PIANO_HIGH - 11, ksBase + delta)))
+        // 没选格子时：←→ 只滚动视野（A 永远写 A，不会因为滚动变调），↑↓ 换八度
+        else if (e.key === 'ArrowLeft') scrollPiano(-1)
+        else if (e.key === 'ArrowRight') scrollPiano(1)
+        else setKsBase(ksBase + delta)
         return
       }
     }
     if (!(e.ctrlKey || e.metaKey)) {
-      // 纯字母：敲代号落笔（没选格子 / [Define] 里没有代号时不接管）
-      // Shift 也允许：代号首字母本来就是大写，用户可能按着 Shift 敲
+      // 单键代号：52 个字母（区分大小写）+ 10 个数字 + 英文符号（`=` 除外）
+      // 没选格子 / [Define] 里没有代号时不接管
       if (e.altKey) return
-      if (!/^[a-zA-Z]$/.test(e.key)) return
+      if (!codeNameFromKey(e.key)) return
       if (!selCells.length || !names.length) return
       e.preventDefault()
-      typeLetter(e.key)
+      typeCode(e.key)
       return
     }
     const k = e.key.toLowerCase()
@@ -2730,7 +2960,7 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
               volInfo.mark.has(cellKey)
                 ? `\n${tr('音量 {v}（<v={v}>）', { v: volInfo.mark.get(cellKey) ?? 100 })}`
                 : ''
-            }${evs?.length ? `\n${evs.map((e) => e.names.join('+') + ` (v=${e.volume})`).join('\n')}` : ''
+            }${evs?.length ? `\n${evs.map((e) => codeGlyphs(e.names) + ` (v=${e.volume})`).join('\n')}` : ''
             }`}
             onMouseDown={(e) => onCellDown(e, ri, col)}
             onMouseOver={() => onCellEnter(ri, col)}
@@ -2760,7 +2990,7 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
             ) : null}
             {evs?.length ? (
               <span className="gd-label">
-                {cell >= 20 ? name.slice(0, 4) : ''}
+                {cell >= 20 ? codeGlyph(name).slice(0, 4) : ''}
                 {extra && cell >= 24 ? <i>{extra}</i> : null}
               </span>
             ) : null}
@@ -2849,8 +3079,19 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
             style={{ width: 88 }}
           />
         </label>
-        <label className="gd-inst" title={tr('切换编辑对象：Hitsound 或 [Keysound] 里的乐器')}>
-          <select className="gd-inst-sel" value={ksInst} onChange={(e) => setKsInst(e.target.value)}>
+        <label className="gd-inst" title={tr('切换编辑对象：Hitsound / [Keysound] 乐器 / 音效设置')}>
+          <select
+            className="gd-inst-sel"
+            value={defDlg ? '@define' : ksInst}
+            onChange={(e) => {
+              const v = e.target.value
+              if (v === '@define') {
+                openDefSettings()
+                return
+              }
+              setKsInst(v)
+            }}
+          >
             <option value="">{tr('Hitsound')}</option>
             {ksOptions.map((o) => {
               const dup = ksOptions.filter((x) => x.name === o.name).length > 1
@@ -2860,31 +3101,65 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
                 </option>
               )
             })}
+            <option value="@define">{tr('音效设置')}</option>
           </select>
         </label>
         {ksSel ? (
-          <div className="gd-piano" title={tr('钢琴键盘：点键落笔；A~L 按顺序输入这 12 个音')}>
-            {pianoKeys.map((k) => {
-              const whitesBefore = pianoKeys.filter((x) => !x.black && x.i < k.i).length
-              const whiteW = 100 / 7
-              const blackW = whiteW * 0.62
-              const left = k.black
-                ? Math.max(0, Math.min(100 - blackW, whitesBefore * whiteW - blackW / 2))
-                : whitesBefore * whiteW
-              return (
-                <button
-                  key={k.midi}
-                  className={`gd-pkey${k.black ? ' black' : ' white'}${k.midi === ksBase ? ' root' : ''}`}
-                  style={{ left: `${left}%`, width: `${k.black ? blackW : whiteW}%` }}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => applyNote(k.midi)}
-                  title={`${k.name} · ${tr('按 {key} 输入', { key: k.key })}`}
-                >
-                  <span className="gd-pkey-name">{k.name}</span>
-                  <span className="gd-pkey-key">{k.key}</span>
-                </button>
-              )
-            })}
+          <div className="gd-piano-wrap">
+            <button
+              className="gd-piano-nav"
+              title={tr('向左滚动')}
+              disabled={!pianoNav.left}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => scrollPiano(-1)}
+            >
+              ◀
+            </button>
+            <div
+              ref={pianoRef}
+              className="gd-piano"
+              onScroll={syncPianoNav}
+              title={tr('钢琴键盘：点键落笔；A~L 直接对应音名（A 永远是 A，高亮框 = 当前输入八度）')}
+            >
+              <div className="gd-piano-inner" style={{ width: pianoKeys.width }}>
+                {pianoKeys.list.map((k) => {
+                  // 只给 C 键标八度音名；当前八度那一组再显示输入字母（A~L）
+                  const inOct = k.midi >= ksBase && k.midi < ksBase + 12
+                  const isC = ((k.midi % 12) + 12) % 12 === 0
+                  const label = inOct ? (isC ? k.name : k.key) : isC ? k.name : ''
+                  return (
+                    <button
+                      key={k.midi}
+                      data-midi={k.midi}
+                      className={`gd-pkey${k.black ? ' black' : ' white'}${inOct ? ' in-oct' : ''}${
+                        k.midi === ksBase ? ' root' : ''
+                      }`}
+                      style={{ left: k.left, width: k.width }}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => pickPianoKey(k.midi)}
+                      title={`${k.name} · ${tr('按 {key} 输入', { key: k.key })}`}
+                    >
+                      {label ? <span className="gd-pkey-name">{label}</span> : null}
+                    </button>
+                  )
+                })}
+                {/* 快捷键（A~L）会写进这 12 个键，框出来免得找不到输入范围 */}
+                <div
+                  className="gd-piano-oct"
+                  style={{ left: octLeft, width: octWidth }}
+                  aria-hidden="true"
+                />
+              </div>
+            </div>
+            <button
+              className="gd-piano-nav"
+              title={tr('向右滚动')}
+              disabled={!pianoNav.right}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => scrollPiano(1)}
+            >
+              ▶
+            </button>
           </div>
         ) : (
         <div
@@ -2912,11 +3187,11 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
                   brushPress.current = { name: n, x: e.clientX, y: e.clientY, active: false }
                 }}
                 onClick={(e) => onBrushClick(e, n)}
-                title={`${n}${colorByName.get(n) ? ' · ' + colorByName.get(n) : ''}${
+                title={`${codeGlyph(n)}${codeGlyph(n) !== n ? ` (${n})` : ''}${colorByName.get(n) ? ' · ' + colorByName.get(n) : ''}${
                   namesInSel.has(n) ? ' · ' + tr('选中的格子里已有') : ''
                 }${pinned ? '（' + tr('双击型') + '）' : ''} · ${tr('拖动可调整顺序')}`}
               >
-                {n}
+                {codeGlyph(n)}
                 {namesInSel.has(n) ? (
                   <i className="gd-brush-check" title={tr('选中的格子里已经有这个音效')}>
                     <svg viewBox="0 0 8 8" width="5.5" height="5.5" aria-hidden="true">
@@ -2959,7 +3234,7 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
               <span className="gd-tag blue">{tr('代号')}</span>
               <span className="mono gd-typed">{typed}</span>
               <span className="hint">
-                {typedCands.length ? `→ ${typedCands.join(' / ')}` : tr('没有匹配的代号')}
+                {typedCands.length ? `→ ${typedCands.map(codeGlyph).join(' / ')}` : tr('没有匹配的代号')}
               </span>
             </span>
             <span className="gd-sep" />
@@ -2995,7 +3270,7 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
             ) : null}
             <span className="mono gd-names">
               {selInfo.evs.length
-                ? selInfo.evs.map((e) => `${e.names.join('+')} v=${e.volume}`).join('  |  ')
+                ? selInfo.evs.map((e) => `${codeGlyphs(e.names)} v=${e.volume}`).join('  |  ')
                 : tr('（空格子）')}
             </span>
           </>
@@ -3007,16 +3282,183 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
         <span style={{ flex: 1 }} />
         <span className="hint">
           {ksSel
-            ? tr('A~L 按音名输入（当前 {base} 起）· 1–7 / Ctrl+↑↓ 换八度 · Ctrl+←→ 半音：没选格子时移动输入范围，选中时移调', {
+            ? tr('A~L 直接对应音名（A 永远是 A，高亮框内为当前 {base} 八度）· 1–8 / Ctrl+↑↓ 换八度 · Ctrl+←→ 滚动键盘 · 选中时移调', {
                 base: midiToName(ksBase),
               })
             : !names.length
               ? tr('先在 [Define] 里定义音效，才能在格子里加减')
               : brushMode === 'double'
                 ? tr('双击型（{name}）：点格子落笔 · 单击音效回到单击型', { name: brushPin })
-                : tr('单击型：先点/拖选格子，再点音效（或直接敲代号）落笔 · 双击音效切换双击型')}
+                : tr('单击型：先点/拖选格子，再点音效（或直接敲代号）落笔 · 字母区分大小写，数字/符号也能直接敲 · 双击音效切换双击型')}
         </span>
       </div>
+
+      {defDlg ? (
+        <div className="gd-vol-overlay" onMouseDown={() => setDefDlg(null)}>
+          <div className="gd-def-dlg" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="gd-def-head">
+              <span className="gd-vol-title">{tr('音效设置')}</span>
+              <span className="hint">{tr('左键选中一条，改槽位、代号和颜色；改代号会同步正文')}</span>
+            </div>
+
+            <div className="gd-def-list">
+              {hsDefs.map((h) => {
+                const on = defDlg.sel === h.name
+                const slots = slotsOfDef(h)
+                return (
+                  <div
+                    key={h.name}
+                    className={`gd-def-row${on ? ' on' : ''}`}
+                    onClick={() => pickDef(h)}
+                    title={`${codeGlyph(h.name)}${codeGlyph(h.name) !== h.name ? ` (${h.name})` : ''} = ${h.value}`}
+                  >
+                    <i
+                      className="gd-def-dot"
+                      style={{ background: h.color || colorByName.get(h.name) || accentHex }}
+                    />
+                    <span className="gd-def-code mono">{codeGlyph(h.name)}</span>
+                    <span className="gd-def-slots mono">{slots.length ? slots.join('|') : 'custom'}</span>
+                    <button
+                      className="gd-def-play"
+                      title={tr('试听')}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void previewDef(h)
+                      }}
+                    >
+                      ▶
+                    </button>
+                  </div>
+                )
+              })}
+              {!hsDefs.length ? (
+                <div className="gd-def-empty hint">{tr('还没有 hitsound 定义：先在 [Define] 里写一条')}</div>
+              ) : null}
+            </div>
+
+            {defDlg.sel ? (
+              <>
+                <div className="gd-def-name">
+                  <label>{tr('代号')}</label>
+                  <input
+                    className="si-code-input mono"
+                    maxLength={16}
+                    spellCheck={false}
+                    value={defDlg.name}
+                    onChange={(e) => {
+                      // 和「添加音效」一致：只留字母、大小写原样；单个数字/符号转成 One / Slash
+                      const norm = normalizeCodeInput(e.target.value)
+                      setDefMsg('')
+                      setDefDlg((d) => (d ? { ...d, name: norm } : d))
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && defCanApply) {
+                        e.preventDefault()
+                        applyDefEdit()
+                      }
+                    }}
+                  />
+                  <span className="hint">
+                    {tr('正文里 {n} 处引用会跟着改', { n: defRefs })}
+                  </span>
+                </div>
+
+                <div className="gd-def-name">
+                  <label>{tr('颜色')}</label>
+                  <input
+                    className="si-code-input mono gd-def-color"
+                    value={defDlg.color}
+                    placeholder={tr('留空 = 默认色')}
+                    spellCheck={false}
+                    onChange={(e) => {
+                      setDefMsg('')
+                      setDefDlg((d) => (d ? { ...d, color: e.target.value } : d))
+                    }}
+                    onBlur={() => {
+                      // 失焦时把 red / #f00 归一成 #RRGGBB
+                      const c = parseColorToken(defDlg.color)
+                      if (c) setDefDlg((d) => (d ? { ...d, color: c.toUpperCase() } : d))
+                    }}
+                  />
+                  <input
+                    type="color"
+                    className={`as-swatch${defDlg.color ? '' : ' is-empty'}`}
+                    title={defColor ? defColor.toUpperCase() : tr('默认色（点一下挑一个）')}
+                    value={defColor ? defColor.toUpperCase() : '#7aa2f7'}
+                    onChange={(e) => {
+                      setDefMsg('')
+                      setDefDlg((d) => (d ? { ...d, color: e.target.value.toUpperCase() } : d))
+                    }}
+                  />
+                  {defDlg.color ? (
+                    <button
+                      className="as-color-clear"
+                      onClick={() => {
+                        setDefMsg('')
+                        setDefDlg((d) => (d ? { ...d, color: '' } : d))
+                      }}
+                    >
+                      {tr('默认')}
+                    </button>
+                  ) : null}
+                  <span className="hint">{tr('格子和列表里的颜色都跟着变')}</span>
+                </div>
+
+                <div className="as-slots gd-def-slotgrid">
+                  <div className="as-corner" />
+                  {SLOT_HITS.map((hit) => (
+                    <div key={hit} className="as-col">
+                      {hit}
+                    </div>
+                  ))}
+                  {SLOT_SETS.map((set) => (
+                    <Fragment key={set}>
+                      <div className="as-row">{set}</div>
+                      {SLOT_HITS.map((hit) => {
+                        const slot = `${set}-${hit}`
+                        const on = defDlg.slots.includes(slot)
+                        return (
+                          <label key={slot} className={`as-cell${on ? ' on' : ''}`} title={slot}>
+                            <input type="checkbox" checked={on} onChange={() => toggleDefSlot(slot)} />
+                          </label>
+                        )
+                      })}
+                    </Fragment>
+                  ))}
+                </div>
+                <div className="hint gd-def-tip">
+                  {tr('一个都不勾 = custom（正文里只能用代号调用）；勾多个会用')} <span className="mono">|</span>{' '}
+                  {tr('连起来。')}
+                </div>
+              </>
+            ) : null}
+
+            <div className="gd-vol-foot">
+              <span
+                className={`hint${defDup || (defDlg.sel && (!defNameOk || !defColorOk)) ? ' si-err' : ''}`}
+              >
+                {defMsg ||
+                  (defDup
+                    ? tr('代号 {name} 已经被占用', { name: defNextName })
+                    : defDlg.sel && !defNameOk
+                      ? tr('代号只能用英文字母，大小写不限')
+                      : defDlg.sel && !defColorOk
+                        ? tr('颜色看不懂：写 #RRGGBB 或 red / green / blue…')
+                        : defDlg.sel
+                          ? tr('槽位、代号和颜色改完点「应用」')
+                          : tr('左键选中一条再改'))}
+              </span>
+              <button className="btn small" onClick={() => setDefDlg(null)}>
+                {tr('关闭')}
+              </button>
+              <button className="btn small accent" disabled={!defCanApply} onClick={applyDefEdit}>
+                {tr('应用')}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {findDlg ? (
         <div className="gd-vol-overlay gd-find-overlay" onMouseDown={closeFind}>

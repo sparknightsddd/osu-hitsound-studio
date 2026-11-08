@@ -779,6 +779,15 @@ export function planOsuExport(doc: ChartDoc, opts: OsuExportOptions = {}): OsuEx
 
   // 6) 音效组编号 / 音量搬到绿线
   const timingPlan = applyHitsoundTiming(defaultTimingLines(doc), moves)
+  /**
+   * 导出时 [TimingPoints] 的采样组统一写成 soft（2）。
+   *
+   * 用户要求：绿线的 d/n/s 全部是 soft；导出结果里原本是 auto（0）的
+   * （红线默认就是 0）也一并改成 soft，免得谱面里还留着「自动」。
+   * 物件本身的 normalSet/additionSet 不动 —— 它决定实际读哪个 wav 文件，
+   * 绿线只影响后续自动取值。
+   */
+  const timingLines = timingPlan.lines.map((l) => ({ ...l, sampleSet: 2 }))
   if (objectCount > 20 && timingPlan.added > objectCount / 3) {
     warnings.push(
       `这份谱要在 ${objectCount} 个物件之间来回切音效组，补了 ${timingPlan.added} 条绿线。` +
@@ -787,7 +796,7 @@ export function planOsuExport(doc: ChartDoc, opts: OsuExportOptions = {}): OsuEx
   }
 
   // 7) 文本
-  const text = toOsu(doc, opts.version || 'Hitsound', hitObjects, timingPlan.lines)
+  const text = toOsu(doc, opts.version || 'Hitsound', hitObjects, timingLines)
 
   return {
     hitObjects,
@@ -798,7 +807,7 @@ export function planOsuExport(doc: ChartDoc, opts: OsuExportOptions = {}): OsuEx
     comboCount: combos.length,
     mixCount,
     objectCount,
-    timing: timingPlan.lines,
+    timing: timingLines,
     greenLines: timingPlan.added,
     text,
   }

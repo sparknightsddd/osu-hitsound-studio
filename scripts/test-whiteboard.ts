@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto'
 import { renderOsuSoundsHs } from '../src/core/osuToHs'
 import { extractOsuSounds, soundCodeKey } from '../src/core/osuSounds'
 import { parseChart } from '../src/core/parse'
-import { normalizeSoundName } from '../src/components/SoundImportDialog'
+import { normalizeCodeInput } from '../src/core/codes'
 
 const src = process.argv[2]
 const dir = dirname(src)
@@ -37,11 +37,14 @@ const ok = (cond: boolean, msg: string) => {
 }
 
 // 1) 代号规整
-ok(normalizeSoundName('ab') === 'Ab', `ab -> Ab`)
-ok(normalizeSoundName('AB') === 'Ab', `AB -> Ab（Caps Lock 不影响）`)
-ok(normalizeSoundName('aBcD') === 'Abcd', `aBcD -> Abcd`)
-ok(normalizeSoundName('a1!_b') === 'Ab', `a1!_b -> Ab（数字/符号被丢掉）`)
-ok(normalizeSoundName('123') === '', `纯数字 -> 空`)
+ok(normalizeCodeInput('ab') === 'ab', `ab -> ab（小写开头合法）`)
+ok(normalizeCodeInput('AB') === 'AB', `AB -> AB（大小写原样）`)
+ok(normalizeCodeInput('aBcD') === 'aBcD', `aBcD -> aBcD`)
+ok(normalizeCodeInput('a1!_b') === 'ab', `a1!_b -> ab（数字/符号被丢掉）`)
+ok(normalizeCodeInput('123') === '', `纯数字串 -> 空`)
+ok(normalizeCodeInput('1') === 'One', `1 -> One`)
+ok(normalizeCodeInput('/') === 'Slash', `/ -> Slash`)
+ok(normalizeCodeInput('=') === '', `= 不能当代号`)
 
 const res = await extractOsuSounds(text, env)
 if (!res.codes.length) {

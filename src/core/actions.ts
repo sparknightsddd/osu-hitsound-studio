@@ -37,6 +37,11 @@ import { pickChart } from '../components/ChartPicker'
 import { matchHitsounds, matchKeysounds, matchSong, type PickedEntry } from './fileMatch'
 import { singleKeyName } from './keysound'
 import { parseColorToken } from './colors'
+import { osuFileProblem, type OsuFileProblem } from './osuFile'
+import { editHitsoundDefineText } from './defineEdit'
+import { slotFromFileName } from './soundSlots'
+import { isCodeName } from './codes'
+import { t } from '../i18n'
 import type { ChartDoc } from './types'
 
 function log(msg: string) {
@@ -306,13 +311,17 @@ const writtenThisSession = new Set<string>()
 
 /**
  * 写盘前的防覆盖闸门（Electron 专用）。
- * 目标文件已存在、且不是本次会话刚写出的路径时，弹窗要求确认；
+ *
+ * 只有**往别人的文件上写**才问：`ownPath` 是这份谱自己已经关联的路径，
+ * 写回自己的文件属于正常保存（Ctrl+S），不再弹「文件已存在，是否覆盖？」。
+ * 目标存在、且不是本次会话刚写出的路径时，弹窗要求确认；
  * 确认后先把原文件内容复制成 <name>.bak，再覆盖。
  * @returns true = 可以安全写入
  */
-async function guardOverwrite(target: string): Promise<boolean> {
+async function guardOverwrite(target: string, ownPath = ''): Promise<boolean> {
   const api = desktopApi()
   if (!api) return true
+  if (ownPath && samePath(target, ownPath)) return true
   if (writtenThisSession.has(target)) return true
   let st: { exists: boolean; size?: number }
   try {
@@ -377,7 +386,7 @@ export async function saveActive(saveAs = false): Promise<boolean> {
     if (res.canceled || !res.path) return false
     target = res.path
   }
-  if (!(await guardOverwrite(target))) return false
+  if (!(await guardOverwrite(target, f.path || ''))) return false
   const r = await api.writeText(target, f.content)
   if (!r.ok) {
     log(`✗ 保存失败：${r.error}`)
@@ -386,6 +395,69 @@ export async function saveActive(saveAs = false): Promise<boolean> {
   writtenThisSession.add(target)
   s.markSaved(f.id, target)
   log(`✓ 已保存 ${target}`)
+  return true
+}
+
+/**
+ * 浏览器下的「保存 / 不保存 / 取消」：没有原生三按钮对话框，
+ * 用两段 confirm 凑出同样的三个结果（0 保存 / 1 不保存 / 2 取消）。
+ */
+async function askCloseInBrowser(name: string): Promise<0 | 1 | 2> {
+  const save = window.confirm(
+    `${t('「{name}」有未保存的改动。', { name })}\n\n${t('点「确定」= 保存后关闭；点「取消」= 再选要不要丢弃改动。')}`,
+  )
+  if (save) return 0
+  const discard = window.confirm(
+    `${t('不保存改动，直接关闭「{name}」？', { name })}\n\n${t('点「确定」= 丢弃改动并关闭；点「取消」= 留在编辑器里。')}`,
+  )
+  return discard ? 1 : 2
+}
+
+/**
+ * 关闭一份谱面（标签栏 / 资源管理器上的 ×）。
+ *
+ * 有未保存改动时给三个选择：**保存 / 不保存 / 取消**；
+ * 选「保存」但另存为被取消或写盘失败时，谱面保持打开，不丢内容。
+ * @returns 是否真的关掉了
+ */
+export async function closeChart(id: string): Promise<boolean> {
+  const s = useStore.getState()
+  const f = s.files.find((x) => x.id === id)
+  if (!f) return false
+  if (s.files.length <= 1) {
+    log(t('这是最后一份谱面，先新建一份再关它'))
+    return false
+  }
+
+  if (!f.dirty) {
+    useStore.getState().closeFile(id)
+    return true
+  }
+
+  const api = desktopApi()
+  const choice = api
+    ? await api.messageBox({
+        type: 'question',
+        buttons: [t('保存'), t('不保存'), t('取消')],
+        defaultId: 0,
+        cancelId: 2,
+        title: t('未保存的改动'),
+        message: t('「{name}」有未保存的改动，要保存吗？', { name: f.name }),
+        detail: f.path
+          ? `${t('「保存」会写回')} ${f.path}\n${t('「不保存」会丢弃这次的改动。')}`
+          : t('这份谱还没存过盘；选「保存」会让你先挑一个位置。'),
+      })
+    : await askCloseInBrowser(f.name)
+
+  if (choice === 2) return false // 取消：停留在编辑器里，改动都还在
+  if (choice === 0) {
+    // 保存的是「要关的这一份」，先切过去（没保存过时 saveActive 会弹另存为）
+    const cur = useStore.getState()
+    if (cur.activeId !== id) cur.setActive(id)
+    if (!(await saveActive(false))) return false
+  }
+  useStore.getState().closeFile(id)
+  log(t('已关闭 {name}', { name: f.name }))
   return true
 }
 
@@ -403,6 +475,27 @@ export async function openFiles() {
     useStore.getState().setActive(id)
     log(`已打开 ${p.name}`)
   }
+}
+
+/**
+ * 拖文件进窗口：打开拖进来的 .hs 谱面（可编辑，关联磁盘路径，Ctrl+S 写回原文件）。
+ * 和「打开 .hs 文件…」走同一套 addFile + attachPath，只是文件来自 drop 而不是选择框。
+ */
+export async function openDroppedCharts(
+  files: { name: string; file: File; path?: string }[],
+): Promise<boolean> {
+  if (!files.length) return false
+  let last = ''
+  for (const f of files) {
+    const text = await f.file.text()
+    const st = useStore.getState()
+    const id = st.addFile(f.name, text)
+    if (f.path) st.attachPath(id, f.path)
+    st.setActive(id)
+    last = id
+    log(t('已打开 {name}', { name: f.name }))
+  }
+  return !!last
 }
 
 /**
@@ -522,6 +615,35 @@ export function relativeToDir(dir: string, file: string): string {
   return f.split('/').pop() || f
 }
 
+/** 把 osuFileProblem 的原因翻成一句话 */
+function osuProblemText(p: OsuFileProblem): string {
+  return p === 'empty'
+    ? t('文件是空的')
+    : p === 'header'
+      ? t('开头没有 “osu file format vN” 这一行')
+      : t('没有 [General] / [TimingPoints] / [HitObjects] 之类的段落')
+}
+
+/**
+ * 检查一份 .osu 内容，不合格就弹窗说明。
+ * @returns true = 可以继续导入
+ */
+export async function verifyOsuText(text: string, name: string): Promise<boolean> {
+  const problem = osuFileProblem(text)
+  if (!problem) return true
+  log(t('✗ {name} 不是有效的 osu! 谱面：{reason}', { name, reason: osuProblemText(problem) }))
+  await desktopApi()?.messageBox({
+    type: 'warning',
+    buttons: ['知道了'],
+    defaultId: 0,
+    cancelId: 0,
+    title: t('无法读取 .osu'),
+    message: t('「{name}」不是有效的 osu! 谱面', { name }),
+    detail: `${osuProblemText(problem)}\n\n${t('如果只是把别的文件改了后缀，请换一份真正的 .osu。')}`,
+  })
+  return false
+}
+
 export async function importOsuFile(filePath: string): Promise<boolean> {
   try {
     // 有磁盘路径时，先让用户在同目录的多个难度里挑一个
@@ -537,6 +659,8 @@ export async function importOsuFile(filePath: string): Promise<boolean> {
     }
     const name = chosen.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'chart.osu'
     const text = new TextDecoder('utf-8').decode(bin.data)
+    // 挡住「txt 改名成 .osu」：读不出来就别往下走
+    if (!(await verifyOsuText(text, name))) return false
 
     const dir = chosen.replace(/[\\/]+$/, '').replace(/[^\\/]+$/, '')
     const env = desktopOsuEnv(dir, chosen, name)
@@ -658,6 +782,7 @@ export async function importOsuSounds() {
     else {
       // 浏览器模式：只有 File 对象，没有磁盘路径，走不了难度选择器
       const text = await p.file.text()
+      if (!(await verifyOsuText(text, p.name))) continue
       const env = desktopOsuEnv('', '', p.name)
       const ex = await extractOsuSounds(text, env)
       const out = renderOsuSoundsHs(ex, {
@@ -727,7 +852,13 @@ export async function addSoundFileDialog(file: { name: string; path: string }): 
   }
 
   const existing = existingDefsOf(doc)
-  const plan = await pickAddSound({ fileName: file.name, existing })
+  // 文件名本身就是槽位（soft-hitnormal.wav / default.normal-hitclap.wav）时先把槽位勾上
+  const guess = slotFromFileName(file.name)
+  const plan = await pickAddSound({
+    fileName: file.name,
+    existing,
+    initial: guess ? { slots: [guess] } : undefined,
+  })
   if (!plan) return false
   return addHitsoundDefine({
     fileName: file.name,
@@ -751,8 +882,8 @@ function writeDefineLine(line: string, nm: string): { ok: boolean; replacing: bo
     log('✗ 没有打开的谱面，先新建或导入一份再加音效')
     return { ok: false, replacing: false }
   }
-  if (!/^[A-Z][a-z]*$/.test(nm)) {
-    log(`✗ 代号 "${nm}" 不符合命名规则（大写开头 + 小写字母）`)
+  if (!isCodeName(nm)) {
+    log(`✗ 代号 "${nm}" 不符合命名规则（只能用英文字母，大小写不限）`)
     return { ok: false, replacing: false }
   }
   const replacing = s.doc.hitsounds.find((h) => h.name === nm)
@@ -866,6 +997,56 @@ export async function addBuiltinSoundDefine(opts: {
   return true
 }
 
+export interface DefineEditResult {
+  ok: boolean
+  /** 失败原因（ok=false 时有） */
+  error?: string
+  /** 正文里同步改掉的引用数（改名时才有） */
+  changes?: number
+}
+
+/**
+ * 改一条 hitsound 定义：槽位和 / 或代号。
+ *
+ * 改代号时会**同步改正文**：[Hitsound] 段里所有独立的代号 token（`Aa`、
+ * `[Aa Ab]`、`Aa<v=80>` 都算）一起换掉；`Aab` 这种别的代号不会被误伤。
+ * 只动这一行定义 + [Hitsound] 段，[Keysound] 与其它段落不碰。
+ */
+export function editHitsoundDefine(
+  code: string,
+  opts: { name?: string; slots?: string[]; color?: string | null } = {},
+): DefineEditResult {
+  const s = useStore.getState()
+  const f = s.files.find((x) => x.id === s.activeId)
+  if (!f) return { ok: false, error: t('没有打开的谱面，先打开或新建一份') }
+
+  // 用正文重新解析：store 里的 doc 可能还差 180ms
+  const res = editHitsoundDefineText(f.content, code, opts, f.path ? dirname(f.path) : undefined)
+  if (!res.ok || res.text === undefined) {
+    const nextName = (opts.name ?? code).trim()
+    const msg =
+      res.error === 'notFound'
+        ? t('找不到代号 {name}', { name: code })
+        : res.error === 'dup'
+          ? t('代号 {name} 已经被占用', { name: nextName })
+          : res.error === 'badName'
+            ? t('代号只能用英文字母，大小写不限')
+            : res.error === 'badColor'
+              ? t('颜色看不懂：写 #RRGGBB 或 red / green / blue…')
+              : t('这一行不是标准的 hitsound 定义，改不了')
+    return { ok: false, error: msg }
+  }
+
+  if (res.text !== f.content) s.updateContent(f.id, res.text)
+  const name = (opts.name ?? code).trim()
+  log(
+    res.changes
+      ? t('已更新音效 {name}：正文同步了 {n} 处', { name, n: res.changes })
+      : t('已更新音效 {name}', { name }),
+  )
+  return { ok: true, changes: res.changes ?? 0 }
+}
+
 /** 音效库下半层的 +：先选槽位/代号，再把 `default.xxx` 写进 [Define] */
 export async function addBuiltinSoundDialog(ref: string): Promise<boolean> {
   const s = useStore.getState()
@@ -876,10 +1057,13 @@ export async function addBuiltinSoundDialog(ref: string): Promise<boolean> {
   }
   // 用当前正文重新解析一份：切谱/刚改过时 store 里的 doc 可能还差 180ms
   const doc = parseChart(active.content, { baseDir: active.path ? dirname(active.path) : undefined })
+  // `default.soft-hitnormal` 这种引用名本身就带着槽位，弹窗里直接勾上
+  const guess = slotFromFileName(`default.${ref}`)
   const plan = await pickAddSound({
     fileName: `default.${ref}`,
     existing: existingDefsOf(doc),
     value: `default.${ref}`,
+    initial: guess ? { slots: [guess] } : undefined,
   })
   if (!plan) return false
   return addBuiltinSoundDefine({ ref, slots: plan.slots, name: plan.name, color: plan.color })

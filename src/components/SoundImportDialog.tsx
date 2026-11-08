@@ -5,14 +5,16 @@
  *   - 它不再有代号，正文里命中的位置直接留空；
  *   - [Define] 里写一条无名定义（`hitsound <槽位> = <值>`）；
  *   - 编辑器试听时休止符不发声。
- * 其余音效每条都能自定义代号，输入框强制 /^[A-Z][a-z]*$/（首字母大写、其余小写，
- * 数字和符号直接忽略，不管有没有按 Shift / 开 Caps Lock）。
+ * 其余音效每条都能自定义代号，输入框只保留英文字母、大小写原样（`abc` / `ABc` / `aBc`
+ * 都合法）；输入单个数字或符号会转成正文里的名字（`1` → `One`、`/` → `Slash`，`=` 除外）。
  *
  * 和难度选择器一样用「模块级单例 + 独立订阅」，由 actions 在需要时 open()。
  */
 import { useEffect, useRef, useState } from 'react'
 import type { SoundCode } from '../core/osuSounds'
 import { soundCodeKey } from '../core/osuSounds'
+import { normalizeCodeInput } from '../core/codes'
+import { buildDefaultNames } from '../core/importPrefs'
 import { t } from '../i18n'
 
 export interface SoundImportPlan {
@@ -43,52 +45,9 @@ function emit() {
   subs.forEach((f) => f())
 }
 
-/** 把用户输入规整成 /^[A-Z][a-z]*$/：去掉非字母，首字母大写、其余小写 */
+/** 把用户输入规整成代号：只留字母、大小写原样；单个数字/符号转成 One / Slash */
 export function normalizeSoundName(raw: string): string {
-  const letters = raw.replace(/[^A-Za-z]/g, '')
-  if (!letters) return ''
-  return letters[0].toUpperCase() + letters.slice(1).toLowerCase()
-}
-
-/** 给每行配默认代号：先用设置里的预置，再补 Aa、Ab、Ac…（白板跳过） */
-export function buildDefaultNames(
-  rows: SoundImportRow[],
-  wb: string,
-  preset: Record<string, string> = {},
-): Record<string, string> {
-  const used = new Set<string>()
-  const out: Record<string, string> = {}
-  for (const r of rows) {
-    if (r.key === wb) {
-      out[r.key] = ''
-      continue
-    }
-    const p = preset[r.key]
-    if (p && !used.has(p)) {
-      out[r.key] = p
-      used.add(p)
-    }
-  }
-  let a = 0
-  let b = 0
-  for (const r of rows) {
-    if (r.key === wb) continue
-    if (out[r.key] !== undefined) continue
-    for (;;) {
-      const n = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'[a] + 'abcdefghijklmnopqrstuvwxyz'[b]
-      b++
-      if (b > 25) {
-        b = 0
-        a = (a + 1) % 26
-      }
-      if (!used.has(n)) {
-        used.add(n)
-        out[r.key] = n
-        break
-      }
-    }
-  }
-  return out
+  return normalizeCodeInput(raw)
 }
 
 /**
@@ -221,12 +180,12 @@ export default function SoundImportDialog() {
                   value={isWb ? '' : names[r.key] || ''}
                   disabled={isWb}
                   placeholder={isWb ? t('无代号') : t('代号')}
-                  maxLength={4}
+                  maxLength={16}
                   spellCheck={false}
                   onChange={(e) =>
                     setNames((m) => ({
                       ...m,
-                      [r.key]: normalizeSoundName(e.target.value).slice(0, 4),
+                      [r.key]: normalizeSoundName(e.target.value),
                     }))
                   }
                 />
@@ -245,7 +204,7 @@ export default function SoundImportDialog() {
 
         <div className="osu-diff-foot">
           <span className={`osu-diff-hint ${error ? 'si-err' : ''}`}>
-            {error || t('代号只能是大写字母开头 + 小写字母；Esc 取消')}
+            {error || t('代号只能用英文字母，大小写不限；数字/符号会写成 One / Slash（Esc 取消）')}
           </span>
           <div className="si-actions">
             <button className="osu-diff-cancel" onClick={() => finish(null)}>

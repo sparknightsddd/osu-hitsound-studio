@@ -1,5 +1,5 @@
 /** 验证「导入默认代号」的优先级 / = 白板 / 冲突回退逻辑。 */
-import { planDefaultNames } from '../src/core/importPrefs'
+import { buildDefaultNames, planDefaultNames } from '../src/core/importPrefs'
 import { soundCodeKey, type SoundCode } from '../src/core/osuSounds'
 
 let bad = 0
@@ -61,12 +61,11 @@ function mk(set: 'soft' | 'normal' | 'drum', hit: string, index: number, file = 
 {
   const codes = [mk('drum', 'hitfinish', 0)]
   const r = planDefaultNames(codes, { 'drum-hitfinish': 'x1Y' })
-  ok(r.names[soundCodeKey(codes[0])] === 'Xy', 'x1Y -> Xy')
+  ok(r.names[soundCodeKey(codes[0])] === 'xY', 'x1Y -> xY（只留字母、大小写原样）')
 }
 
 // 6) 弹窗里的默认名：预置优先，剩下的补自动名
 {
-  const { buildDefaultNames } = await import('../src/components/SoundImportDialog')
   const codes = [mk('normal', 'hitwhistle', 0), mk('normal', 'hitclap', 0), mk('normal', 'hitclap', 1)]
   const keys = codes.map((c) => soundCodeKey(c))
   const rows = codes.map((c, i) => ({ code: c, key: keys[i], count: 1 }))

@@ -759,15 +759,15 @@ export function parseChart(text: string, opts: ParseOptions = {}): ChartDoc {
             })
           }
           if (/\.(sf2|sf3)$/i.test(path || '')) soundFont = true
-          // keysound 的名字允许全小写（如 guitar / piano），hitsound 必须是大写开头
-          if (name && !(isKs ? /^[A-Za-z][A-Za-z0-9_]*$/.test(name) : /^[A-Z][a-z]*$/.test(name))) {
+          // keysound 的名字允许全小写（如 guitar / piano），hitsound 代号大小写不限
+          if (name && !(isKs ? /^[A-Za-z][A-Za-z0-9_]*$/.test(name) : /^[A-Za-z]+$/.test(name))) {
             diags.push({
               from: leftAbs + leftPart.length - name.length,
               to: leftAbs + leftPart.length,
               severity: 'error',
               message: isKs
                 ? `keysound 名 "${name}" 不符合命名规则（应以字母开头，后可跟字母/数字/下划线）`
-                : `音效名 "${name}" 不符合命名规则（必须以大写字母开头，后可跟小写字母）`,
+                : `音效名 "${name}" 不符合命名规则（只能用英文字母，大小写不限；数字/符号请写成 One / Slash 这样的名字）`,
               code: 'hs-name',
             })
           }

@@ -59,7 +59,7 @@ export interface OsuDifficulty {
 
 /** 一个音效"代码"，对应 [Define] 里的一条 hitsound */
 export interface SoundCode {
-  /** .hs 正文里用的名字，必须匹配 /^[A-Z][a-z]*$/ */
+  /** .hs 正文里用的名字：英文字母，大小写不限（数字/符号用 One / Slash 这类名字） */
   name: string
   sampleSet: SampleSet
   hitType: HitType
@@ -421,7 +421,7 @@ function parseSliderEdges(
 // ---------------------------------------------------------------------------
 
 /**
- * 名字必须匹配 /^[A-Z][a-z]*$/，所以用「大写字母 + 小写字母」的形式依次生成。
+ * 默认从「大写字母 + 小写字母」依次生成（Aa、Ab…），新规则下同样合法。
  */
 function makeNameFactory(): () => string {
   const used = new Set<string>()

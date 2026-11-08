@@ -595,6 +595,17 @@ function readOsuMeta(text) {
   }
 }
 
+/**
+ * 是不是正经 .osu（挡住「txt 改名」）：第一行是 `osu file format vN`，
+ * 且至少有一个已知段落。和渲染进程 src/core/osuFile.ts 的判定保持一致。
+ */
+function looksLikeOsu(text) {
+  const body = String(text || '').replace(/^\uFEFF/, '')
+  const first = body.split(/\r?\n/).find((l) => l.trim() && !l.trim().startsWith('//'))
+  if (!first || !/^osu file format v\d+\s*$/i.test(first.trim())) return false
+  return /^\[(General|Editor|Metadata|Difficulty|Events|TimingPoints|Colours|HitObjects)\]\s*$/im.test(body)
+}
+
 ipcMain.handle('osu:listDifficulties', async (_e, filePath) => {
   try {
     const dir = path.dirname(filePath)
@@ -605,7 +616,10 @@ ipcMain.handle('osu:listDifficulties', async (_e, filePath) => {
       try {
         const st = await fsp.stat(full)
         if (!st.isFile()) continue
-        const meta = readOsuMeta(await fsp.readFile(full, 'utf8'))
+        const text = await fsp.readFile(full, 'utf8')
+        // 不是真的 .osu 就不列出来（否则用户在难度列表里会选到一坨文本）
+        if (!looksLikeOsu(text)) continue
+        const meta = readOsuMeta(text)
         out.push({ name: n, path: full, size: st.size, mtimeMs: st.mtimeMs, ...meta })
       } catch {
         /* 单个难度读失败就跳过 */
@@ -1455,6 +1469,8 @@ ipcMain.handle('dialog:messageBox', async (_e, opts = {}) => {
   if (process.env.HSS_TEST_MESSAGEBOX !== undefined) {
     const seq = process.env.HSS_TEST_MESSAGEBOX.split(',').map((x) => (Number(x) || 0))
     const pick = seq[Math.min(msgBoxSeq++, seq.length - 1)]
+    // 测试靠这行核对弹窗有几个按钮、按钮文案是什么
+    console.log('[messagebox]', JSON.stringify({ buttons: opts.buttons || [], title: opts.title || '' }))
     return pick
   }
   const res = await dialog.showMessageBox(win, {
