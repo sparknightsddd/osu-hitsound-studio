@@ -74,6 +74,29 @@ ok(!!wc && wc.channels === 1, `单声道 PCM 读出来了：${wc && wc.channels}
   ok(r.ok && r.errors.length === 1, `坏文件被跳过：${r.errors[0]}`)
 }
 
+// 5) 延迟混音：A 在 0ms，B 延迟 250ms（successor）
+{
+  const rate = 1000
+  const mk = (file, samples) => {
+    const data = [new Float32Array(samples)]
+    writeWav16(file, { sampleRate: rate, channels: 1, data, frames: samples })
+  }
+  const f1 = path.join(tmp, 'delay-a.wav')
+  const f2 = path.join(tmp, 'delay-b.wav')
+  mk(f1, 100)
+  mk(f2, 50)
+  const w1 = readWav(f1)
+  const w2 = readWav(f2)
+  w1.data[0].fill(0.5)
+  w2.data[0].fill(0.25)
+  const m = mixWavs([w1, w2], [0, 250])
+  ok(m.frames >= 300, `延迟混音长度覆盖 B 的尾巴：${m.frames}`)
+  ok(Math.abs(m.data[0][10] - 0.5) < 0.01, `A 从 0ms 开始：${m.data[0][10]}`)
+  ok(Math.abs(m.data[0][150]) < 0.01, `250ms 之前没有 B：${m.data[0][150]}`)
+  ok(Math.abs(m.data[0][260] - 0.25) < 0.01, `B 在 250ms 之后出现：${m.data[0][260]}`)
+  ok(Math.abs(m.data[0][99] - 0.5) < 0.01, `A 在自己的长度内不受影响：${m.data[0][99]}`)
+}
+
 fs.rmSync(tmp, { recursive: true, force: true })
 console.log(bad ? `\n${bad} 项失败` : '\n全部通过')
 process.exitCode = bad ? 1 : 0

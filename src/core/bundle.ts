@@ -114,6 +114,11 @@ export function planSoundBundle(doc: ChartDoc, chartPath: string): BundlePlan {
       plan.skips.push({ code: h.name, reason: 'keysound 多文件定义（一个代号对应多个音频）' })
       continue
     }
+    // SFZ 的样本散落在 sfz 旁边，改名会破坏 region 里的相对路径，先不打包
+    if (h.library === 'sfz') {
+      plan.skips.push({ code: h.name, reason: 'SFZ 的样本文件不随包复制' })
+      continue
+    }
     const src = unquote(h.resolvedPath || '')
     if (!src) {
       plan.skips.push({ code: h.name, reason: '[Define] 里没有可解析的文件路径' })

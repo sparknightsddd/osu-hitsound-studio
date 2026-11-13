@@ -3,6 +3,7 @@
  *   - `.hs` → 直接打开成新标签（关联磁盘路径，Ctrl+S 写回原文件）；
  *   - `.osu` → 和「从 .osu 导入音效」一样，读文件、选难度、抽出音效写成新谱；
  *     内容不是正经 .osu（比如 txt 改名）会当场拦下；
+ *   - `.mid / .midi` → 「导入 MIDI / musictxt 到 [Keysound]」，选轨道后铺成 keysound 音符；
  *   - `.wav / .ogg` → 音效库的「+」：弹「添加到 [Define]」窗口，选槽位、填代号、写进谱面。
  *
  * 两个容易踩的点：
@@ -12,6 +13,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { addSoundFileDialog, importOsuFile, openDroppedCharts, verifyOsuText } from '../core/actions'
+import { openKeysoundImport } from './KeysoundImportDialog'
 import { filePathOf } from '../core/desktop'
 import { useStore } from '../store'
 import { t } from '../i18n'
@@ -22,6 +24,8 @@ const SOUND_RE = /\.(wav|ogg)$/i
 const HS_RE = /\.hs$/i
 /** 拖 .osu 进来 = 导入这份谱的音效 */
 const OSU_RE = /\.osu$/i
+/** 拖 MIDI 进来 = 往 [Keysound] 铺音符 */
+const MIDI_RE = /\.(mid|midi|smf)$/i
 
 export default function FileDrop() {
   const [over, setOver] = useState(false)
@@ -65,6 +69,7 @@ export default function FileDrop() {
       reset()
       const hss = all.filter((f) => HS_RE.test(f.name))
       const osus = all.filter((f) => OSU_RE.test(f.name))
+      const midis = all.filter((f) => MIDI_RE.test(f.name))
       const sounds = all.filter((f) => SOUND_RE.test(f.name))
 
       // .hs 优先：拖谱面进来就是想打开它（同时拖了 .osu / wav 也不抢）
@@ -95,9 +100,17 @@ export default function FileDrop() {
         return
       }
 
+      // .mid 其次：打开 keysound 导入框并预填这个文件
+      if (midis.length) {
+        if (midis.length > 1) log(t('一次只导入一个 MIDI，已选 {name}', { name: midis[0].name }))
+        if (sounds.length) log(t('已忽略同时拖入的 {n} 个音效文件', { n: sounds.length }))
+        openKeysoundImport({ file: midis[0], path: filePathOf(midis[0]) || undefined })
+        return
+      }
+
       if (!sounds.length) {
         log(
-          t('✗ 只支持拖入 .hs / .osu 谱面或 .wav / .ogg 音效（这次是：{files}）', {
+          t('✗ 只支持拖入 .hs / .osu 谱面、.mid 或 .wav / .ogg 音效（这次是：{files}）', {
             files: all.map((f) => f.name).join('、'),
           }),
         )
@@ -140,6 +153,7 @@ export default function FileDrop() {
         <div className="drop-title">{t('松手打开 / 导入')}</div>
         <div className="drop-sub">{t('.hs → 打开谱面')}</div>
         <div className="drop-sub">{t('.osu → 导入音效')}</div>
+        <div className="drop-sub">{t('.mid → 导入到 [Keysound]')}</div>
         <div className="drop-sub">{t('.wav / .ogg → 添加到 [Define]')}</div>
       </div>
     </div>

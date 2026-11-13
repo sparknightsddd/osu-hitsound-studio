@@ -96,6 +96,15 @@ const ev = async (expr) => {
   return r.result?.result?.value
 }
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+/** 轮询等条件成立：音频解码/读盘耗时不稳定，固定 wait 容易偶发失败 */
+async function waitFor(expr, ms = 6000) {
+  const t0 = Date.now()
+  while (Date.now() - t0 < ms) {
+    if (await ev(expr)) return true
+    await wait(150)
+  }
+  return false
+}
 const T = (name, cond, extra = '') => console.log(`${cond ? 'PASS' : 'FAIL'}  ${name} ${extra}`)
 await send('Runtime.enable')
 await wait(2800)
@@ -149,7 +158,7 @@ const dirFwd = DIR.replace(/\\/g, '/')
 await ev(`${MOD}.setText(${JSON.stringify(
   chart0.replace('[Metadata]', `[Files]\npath = "${dirFwd}"\naudio = "song.wav"\n\n[Metadata]`),
 )})`)
-await wait(1800)
+await waitFor(`${MOD}.audio().has === true`, 8000)
 const a1 = await ev(`${MOD}.audio()`)
 T('写完 [Files] audio 后歌曲自动载入', a1.has === true, JSON.stringify(a1))
 T('歌曲名正确', a1.name === 'song.wav')
@@ -160,9 +169,20 @@ console.log('LOG', await ev(`${MOD}.logs(1)`))
 await ev(`${MOD}.setText(${JSON.stringify(
   chart0.replace('[Metadata]', `[Files]\npath = "${dirFwd}"\naudio = "song.wav"\n\n[Metadata]`).replace('Aa = ""', 'Aa = "fx.wav"'),
 )})`)
-await wait(1500)
+await waitFor(`${MOD}.bound().includes('Aa')`, 8000)
 T('hitsound Aa 自动绑定', String(await ev(`${MOD}.bound()`)).includes('Aa'))
 console.log('BIND', await ev(`${MOD}.binds()`))
+
+// 2b) 同一路径改代号：新代号也必须重新绑定（缓存不能只看文件路径）
+await ev(`${MOD}.setText(${JSON.stringify(
+  chart0
+    .replace('[Metadata]', `[Files]\npath = "${dirFwd}"\naudio = "song.wav"\n\n[Metadata]`)
+    .replace('Aa = ""', 'Bb = "fx.wav"')
+    .replace('/Aa = = =/', '/Bb = = =/'),
+)})`)
+await waitFor(`${MOD}.bound().includes('Bb')`, 8000)
+const bound2b = String(await ev(`${MOD}.bound()`))
+T('改名后新代号 Bb 自动绑定', bound2b.includes('Bb'), bound2b)
 
 // 3) 单一 keysound 也走路径自动绑定
 await ev(`${MOD}.setText(${JSON.stringify(
@@ -171,7 +191,7 @@ await ev(`${MOD}.setText(${JSON.stringify(
     .replace('Aa = ""', 'Aa = "fx.wav"')
     .replace('[Timing]', 'keysound custom piano = "ks.wav"\n\n[Timing]'),
 )})`)
-await wait(1500)
+await waitFor(`${MOD}.bound().toLowerCase().includes('ks:piano')`, 8000)
 console.log('DEFS3', await ev(`JSON.stringify(window.__store.getState().doc.hitsounds.map(h => [h.kind, h.name, h.value, h.resolvedPath || '']))`))
 const bound3 = String(await ev(`${MOD}.bound()`))
 T('keysound piano 自动绑定', /ks:piano/i.test(bound3), bound3)
@@ -180,13 +200,13 @@ T('keysound piano 自动绑定', /ks:piano/i.test(bound3), bound3)
 await ev(`${MOD}.setText(${JSON.stringify(
   chart0.replace('[Metadata]', `[Files]\npath = "${dirFwd}"\naudio = "missing.wav"\n\n[Metadata]`),
 )})`)
-await wait(1500)
-const logs4 = String(await ev(`${MOD}.logs(2)`))
+await waitFor(`JSON.stringify(window.__store.getState().output.slice(-6)).includes('读不到')`, 8000)
+const logs4 = String(await ev(`${MOD}.logs(6)`))
 T('读不到的路径有日志提示', logs4.includes('读不到'), logs4.slice(-120))
 await ev(`${MOD}.setText(${JSON.stringify(
   chart0.replace('[Metadata]', `[Files]\npath = "${dirFwd}"\naudio = "song2.wav"\n\n[Metadata]`),
 )})`)
-await wait(1800)
+await waitFor(`${MOD}.audio().name === 'song2.wav'`, 10000)
 const a4 = await ev(`${MOD}.audio()`)
 T('改成 song2.wav 后换曲重载', a4.has === true && a4.name === 'song2.wav', JSON.stringify(a4))
 

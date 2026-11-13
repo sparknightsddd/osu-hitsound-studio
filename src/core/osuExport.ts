@@ -19,6 +19,23 @@
 import type { ChartDoc, HitType, HitsoundDef, SampleSet } from './types'
 import { defaultTimingLines, toOsu, type OsuTimingLine } from './exporter'
 
+/**
+ * 导出提示的翻译钩子。
+ *
+ * osuExport 是纯计算模块，Node 单测会直接引用它；这里不能静态 import i18n
+ * （i18n 会 import `.lang` 文件，tsx 读不了）。应用里由 actions 注入 `t()`，
+ * 单测 / 命令行没注入时保持中文原文。
+ */
+type ExportTranslator = (msg: string, vars?: Record<string, string | number>) => string
+let exportT: ExportTranslator = (msg) => msg
+
+/** 注入翻译函数；传 null 恢复原文（测试用） */
+export function setExportTranslator(fn: ExportTranslator | null) {
+  exportT = fn || ((msg) => msg)
+}
+
+const T = (msg: string, vars?: Record<string, string | number>) => exportT(msg, vars)
+
 const SET_NUM: Record<SampleSet, number> = { normal: 1, soft: 2, drum: 3 }
 const SETS: SampleSet[] = ['soft', 'normal', 'drum']
 const HITS: HitType[] = ['hitnormal', 'hitwhistle', 'hitfinish', 'hitclap']
@@ -80,6 +97,22 @@ export interface ExportVoice {
 function extOf(file: string): string {
   const m = /\.([a-z0-9]+)$/i.exec(file)
   return m ? `.${m[1].toLowerCase()}` : '.wav'
+}
+
+/**
+ * 文件名自带的音效组编号：`soft-hitclap.wav` → 1、`soft-hitclap44.ogg` → 44。
+ * 不是标准命名（`clap-a.ogg`）返回 null —— 这种文件无法靠编号找回来。
+ */
+export function fileSampleIndex(file: string): number | null {
+  const base = String(file || '')
+    .split(/[\\/]/)
+    .pop()!
+    .replace(/\.[a-z0-9]+$/i, '')
+    .toLowerCase()
+  const m = /^(soft|normal|drum)-hit(normal|whistle|finish|clap)(\d*)$/.exec(base)
+  if (!m) return null
+  const n = m[3] ? Number(m[3]) : 1
+  return Number.isFinite(n) && n >= 1 ? n : 1
 }
 
 /** 从文件名猜这是哪种音效（custom 槽位没有 hitType，只能这么判断） */
@@ -210,6 +243,11 @@ export interface Assignment {
   slots: SlotMap
   byName: Map<string, string>
   score: number
+  /**
+   * 这个方案里有没有「一个槽位塞了多个不同音效」。
+   * 有的话导出时必须混音；只要还有别的排法，就不该选它。
+   */
+  mixed: boolean
 }
 
 export interface Combo {
@@ -219,6 +257,14 @@ export interface Combo {
   time: number
   count: number
   volume: number
+  /**
+   * 正文里写着的音效组编号（导入时从 .osu 的 sampleIndex 带过来的）。
+   * 有值时优先用它，导出就不会把 `soft-hitclap44.ogg` 改名成别的编号，
+   * 目录里已有的音频文件可以原样复用。
+   */
+  want?: number
+  /** 同一时刻出现了多个编号（叠了物件），只能取最多的那个 */
+  indexConflict?: boolean
   /** 分配到的编号；分配失败时为空 */
   group?: number
   assign?: Assignment
@@ -233,29 +279,44 @@ export interface ComboOccurrence {
 
 /** 一次导出里所有出现过的「同刻叠音组合」，以及它们在时间轴上的每一次出现 */
 export function collectCombos(doc: ChartDoc): { combos: Combo[]; occurrences: ComboOccurrence[] } {
-  const byTime = new Map<number, { names: Set<string>; volume: number }>()
+  const byTime = new Map<number, { names: Set<string>; volume: number; indices: Map<number, number> }>()
   for (const e of doc.events) {
     if (e.kind === 'keysound') continue
     const t = Math.floor(e.time + 1e-6)
+    // 正文里的 `<n>`：导入时就是原 .osu 的 sampleIndex，导出要沿用它
+    const idx = typeof e.index === 'number' && Number.isFinite(e.index) && e.index > 0 ? Math.floor(e.index) : null
     const cur = byTime.get(t)
     if (cur) {
       for (const n of e.names) if (n) cur.names.add(n)
+      if (idx != null) cur.indices.set(idx, (cur.indices.get(idx) || 0) + 1)
     } else {
-      byTime.set(t, { names: new Set(e.names.filter(Boolean)), volume: e.volume })
+      const indices = new Map<number, number>()
+      if (idx != null) indices.set(idx, 1)
+      byTime.set(t, { names: new Set(e.names.filter(Boolean)), volume: e.volume, indices })
     }
   }
 
   const map = new Map<string, Combo>()
   const occurrences: ComboOccurrence[] = []
-  for (const [time, { names, volume }] of byTime) {
+  for (const [time, { names, volume, indices }] of byTime) {
     if (!names.size) continue
     const list = [...names].sort()
-    const key = list.join('+')
+    // 同一时刻叠了多个物件、各自编号不同时，一个绿线只能写一个编号，取出现最多的
+    let want: number | undefined
+    let indexConflict = false
+    if (indices.size) {
+      const sorted = [...indices.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])
+      want = sorted[0][0]
+      indexConflict = sorted.length > 1
+    }
+    // 编号也算组合的一部分：同样的音效在别的编号下用的是另一批文件，不能合成一组
+    const key = `${list.join('+')}${want ? `#${want}` : ''}`
     let c = map.get(key)
     if (!c) {
-      c = { key, names: list, time, count: 0, volume }
+      c = { key, names: list, time, count: 0, volume, want }
       map.set(key, c)
     }
+    if (indexConflict) c.indexConflict = true
     c.count++
     if (time < c.time) c.time = time
     occurrences.push({ time, volume, combo: c })
@@ -303,7 +364,8 @@ function assignmentsOf(combo: Combo, voices: Map<string, ExportVoice>, order: st
       }
 
       // 走到这里一定有 hitnormal（白板兜底），不需要再补空槽位
-      out.push({ slots, byName, score: scoreOf(pick, order, normalSet, addSet, lists) })
+      const mixed = [...slots.values()].some((arr) => arr.filter((n) => n !== WHITEBOARD).length > 1)
+      out.push({ slots, byName, score: scoreOf(pick, order, normalSet, addSet, lists), mixed })
       return
     }
     for (const c of lists[i]) {
@@ -312,7 +374,10 @@ function assignmentsOf(combo: Combo, voices: Map<string, ExportVoice>, order: st
     }
   }
   walk(0)
-  return out.sort((a, b) => b.score - a.score)
+  // 能不混合就不混合：先按「有没有槽位叠了多个音效」分档，再按槽位优先级 / 候选顺序排。
+  // 否则 A 同时有 sw/sc、B 只有 sw 时，会优先把 A 也塞进 sw（候选 0 得分更高），
+  // 导致本来可以 A→sc / B→sw 的组合被无谓地混音。
+  return out.sort((a, b) => Number(a.mixed) - Number(b.mixed) || b.score - a.score)
 }
 
 /** 方案得分：槽位越靠前越高；hitnormal 跟 additionSet 同组再补一点 */
@@ -364,24 +429,60 @@ function slotSig(names: string[], voices: Map<string, ExportVoice>): string {
   return names
     .map((n) => {
       const v = voices.get(n)
-      if (v && !v.file && v.defaultRef) return `@${v.defaultRef}`
-      if (!n) return '@'
-      return n
+      if (!v) return n ? `n:${n}` : '@'
+      // 按「实际音色文件」比较：两个不同的代号指向同一个文件时是同一个声音，
+      // 没必要为了代号不同另开一个编号、再复制一份一模一样的音频。
+      if (v.file) return `f:${v.file.replace(/\\/g, '/').toLowerCase()}`
+      if (v.defaultRef) return `d:${v.defaultRef}`
+      return '@'
     })
     .sort()
     .join('+')
 }
 
-/** 这个方案能不能塞进已有编号（槽位要么空着，要么正好是同一批音色；空数组 = 必须留空） */
-function canPlace(group: SlotMap, a: Assignment, voices: Map<string, ExportVoice>): boolean {
+/**
+ * 这个方案能不能塞进已有编号（槽位要么空着，要么正好是同一批音色；空数组 = 必须留空）。
+ *
+ * 唯一的例外是「隐式白板」：组合里没写 hitnormal 时，导出仍会生成一个带基础音的
+ * 圆圈。如果这个编号上已经有 hitnormal 音色（别的物件用的），直接复用那份文件，
+ * 不要为了「留空」另开一个编号 —— 那会凭空多出一整套音效文件，
+ * 导入的谱也就没法原样导出了。
+ */
+/** 槽位里是不是「只有白板」（空代号或空数组） */
+function isBlankSlot(names: string[]): boolean {
+  return !names.length || names.every((n) => !n)
+}
+
+function canPlace(
+  group: SlotMap,
+  a: Assignment,
+  voices: Map<string, ExportVoice>,
+  /**
+   * 允许复用/填充编号里已有的基础 hitnormal。
+   * 只对「正文带编号」的组合打开：那种组合是从 .osu 导进来的，
+   * 复用已有文件才不会凭空多出 soft-hitclap11 之类的副本；
+   * 手写谱没编号，仍按白板语义要求 hitnormal 槽位留空。
+   */
+  allowNormalReuse = false,
+): boolean {
   for (const [k, names] of a.slots) {
     const cur = group.get(k)
-    if (!names.length) {
-      // 要求这个槽位没有自定义音效，编号里却已经放了 → 会串音
-      if (cur && cur.length) return false
-      continue
+    // 编号里还没有这个槽位 → 直接加进来（同一个编号本来就可以带多个槽位的文件）
+    if (!cur) continue
+    const normalSlot = k.endsWith('-hitnormal')
+    const isNormalName = (n: string) => (voices.get(n)?.cands || []).some((c) => c.endsWith('-hitnormal'))
+    if (isBlankSlot(names)) {
+      if (isBlankSlot(cur)) continue
+      // 隐式白板碰上编号里已有的 hitnormal 音色 → 复用，不另开编号
+      if (allowNormalReuse && normalSlot && cur.every((n) => !!n && isNormalName(n))) continue
+      return false
     }
-    if (cur && slotSig(cur, voices) !== slotSig(names, voices)) return false
+    if (isBlankSlot(cur)) {
+      // 空槽位本来是「必须留空」，但 hitnormal 可以被真正的 normal 音色填上
+      if (allowNormalReuse && normalSlot && names.every((n) => !!n && isNormalName(n))) continue
+      return false
+    }
+    if (slotSig(cur, voices) !== slotSig(names, voices)) return false
   }
   return true
 }
@@ -404,6 +505,12 @@ export interface ExportFileTask {
   defaults: string[]
   /** 是否需要混音（from.length + defaults.length > 1） */
   mix: boolean
+  /** 每个 from 源文件的延迟（毫秒），按 from 顺序；缺省 0。successor 用 */
+  delays?: number[]
+  /** 每个 defaults 内置音效的延迟（毫秒），按 defaults 顺序；缺省 0 */
+  defaultDelays?: number[]
+  /** 允许覆盖目录里同名但内容不同的文件（全局白板副槽位用） */
+  overwrite?: boolean
   /**
    * 这个槽位需要混音的位置（毫秒，升序）：
    * 这些时刻有多个音效落在同一个槽位上，导出时会叠成一个 wav。
@@ -426,6 +533,21 @@ export interface ExportFileTask {
       path: string
     }[]
   }
+}
+
+/** 某个时间点最终要写进 .osu 的 hitSample + hitSound 位 */
+export interface ComboSample {
+  /** hitSound 位：1 normal / 2 whistle / 4 finish / 8 clap */
+  bits: number
+  normalSet: SampleSet
+  additionSet: SampleSet
+  /** 1 normal / 2 soft / 3 drum */
+  normalSetNum: number
+  additionSetNum: number
+  /** 音效组编号，对应 plan.files 里同编号的文件 */
+  group: number
+  volume: number
+  names: string[]
 }
 
 /** 一个物件要的「音效组编号 + 音量」 */
@@ -467,7 +589,7 @@ export function applyHitsoundTiming(
       if (list[i].uninherited === 0) lastSv = list[i].beatLength
     }
     const cur = i >= 0 ? list[i] : null
-    if (cur && cur.sampleIndex === mv.index && cur.volume === mv.volume) continue
+    if (cur && cur.sampleIndex === mv.index && cur.volume === mv.volume && cur.sampleSet === mv.set) continue
 
     // 这一刻已经有线：直接改（红绿重叠时两条都改）
     let touched = false
@@ -508,6 +630,10 @@ export interface OsuExportPlan {
   files: ExportFileTask[]
   errors: string[]
   warnings: string[]
+  /** 没有合法槽位、被跳过的组合（写入 .osu 时可以确认后跳过它们） */
+  skippedCombos: Combo[]
+  /** 「没有合法槽位」的那些 error（其余是缺定义之类的致命错误） */
+  noSlotErrors: string[]
   /** 出现的不同组合数 */
   comboCount: number
   /** 混音任务数 */
@@ -518,6 +644,8 @@ export interface OsuExportPlan {
   timing: OsuTimingLine[]
   /** 新插的绿线条数 */
   greenLines: number
+  /** 时间（整数毫秒）→ 该时刻的样本，供「直接写入 .osu」复用 */
+  samples: Map<number, ComboSample>
 }
 
 export interface OsuExportOptions {
@@ -527,6 +655,11 @@ export interface OsuExportOptions {
   slotOrder?: string[]
   /** 用户设置里能不能改默认顺序还没接，先留口子 */
   fallbackVolume?: number
+  /**
+   * 目标 .osu 已经占用的音效组编号。直接写入现有谱时传进来，
+   * 新分配的编号会跳过它们，避免覆盖目标谱自己的音效。
+   */
+  reservedIndices?: number[]
 }
 
 /**
@@ -550,7 +683,7 @@ export function buildVoiceMap(
       continue
     }
     if (!v.file && !v.defaultRef) {
-      errors.push(`${v.name}：${v.raw || '（空）'} 既不是 default.xxx，也没有解析到文件`)
+      errors.push(T('{name}：{raw} 既不是 default.xxx，也没有解析到文件', { name: v.name, raw: v.raw || T('（空）') }))
       continue
     }
     voices.set(v.name, v)
@@ -570,8 +703,19 @@ export interface SlotConflictReport {
   count: number
   /** 每一次出现的时间（毫秒，升序） */
   times: number[]
-  /** 为什么排不出合法槽位 */
+  /** 为什么排不出合法槽位（中文原文，日志 / 测试 / 兜底用） */
   reason: string
+  /**
+   * 可翻译版本：msgid + 变量。
+   * 界面里用 `tr(reasonKey, vars)` 渲染；`{names}` / `{detail}` 需要按语言拼接，
+   * 所以另外给出 reasonList / reasonParts。
+   */
+  reasonKey: string
+  reasonVars: Record<string, string | number>
+  /** `{names}` 里的代号（界面按语言用顿号或逗号连接） */
+  reasonList?: string[]
+  /** `{detail}` 里的明细（界面按语言拼成「T 在 soft/normal」） */
+  reasonParts?: { name: string; sets: string[] }[]
 }
 
 /**
@@ -597,22 +741,52 @@ export function detectSlotConflicts(
   for (const c of combos) {
     if (assignmentsOf(c, voices, order).length) continue
     const times = timesByKey.get(c.key) || [c.time]
+    const why = conflictReason(c, voices)
     out.push({
       names: [...c.names],
       count: times.length,
       times,
-      reason: conflictReason(c, voices),
+      reason: why.reason,
+      reasonKey: why.reasonKey,
+      reasonVars: why.reasonVars,
+      reasonList: why.reasonList,
+      reasonParts: why.reasonParts,
     })
   }
   return out.sort((a, b) => (a.times[0] ?? 0) - (b.times[0] ?? 0))
 }
 
-/** 把「排不出方案」翻译成一句人话 */
-function conflictReason(c: Combo, voices: Map<string, ExportVoice>): string {
+/** 把「排不出方案」翻译成一句人话；同时给出可翻译的 msgid + 变量 */
+function conflictReason(
+  c: Combo,
+  voices: Map<string, ExportVoice>,
+): {
+  reason: string
+  reasonKey: string
+  reasonVars: Record<string, string | number>
+  reasonList?: string[]
+  reasonParts?: { name: string; sets: string[] }[]
+} {
   const missing = c.names.filter((n) => !voices.has(n))
-  if (missing.length) return `[Define] 里没有代号 ${missing.join('、')}`
+  if (missing.length) {
+    const names = missing.join('、')
+    return {
+      reason: `[Define] 里没有代号 ${names}`,
+      reasonKey: '[Define] 里没有代号 {names}',
+      reasonVars: { names },
+      reasonList: missing,
+    }
+  }
   const noSlot = c.names.filter((n) => !(voices.get(n)?.cands.length))
-  if (noSlot.length) return `${noSlot.join('、')} 没有可用槽位（检查 [Define] 里的写法）`
+  if (noSlot.length) {
+    const names = noSlot.join('、')
+    return {
+      reason: `${names} 没有可用槽位（检查 [Define] 里的写法）`,
+      reasonKey: '{names} 没有可用槽位（检查 [Define] 里的写法）',
+      reasonVars: { names },
+      reasonList: noSlot,
+    }
+  }
 
   const candsOf = (n: string) => voices.get(n)?.cands || []
   const setOf = (k: string) => k.slice(0, k.indexOf('-'))
@@ -622,28 +796,63 @@ function conflictReason(c: Combo, voices: Map<string, ExportVoice>): string {
   const common = (list: Set<string>[]) =>
     list.length ? [...list[0]].filter((s) => list.every((x) => x.has(s))) : []
   /** `T 在 soft-hitfinish` 这样列出每个代号各自的去向 */
-  const detail = (parts: { n: string; sets: string[] }[]) =>
-    parts.map((x) => `${x.n} 在 ${x.sets.join('/')}`).join('、')
+  const detail = (parts: { name: string; sets: string[] }[]) =>
+    parts.map((x) => `${x.name} 在 ${x.sets.join('/')}`).join('、')
 
   const addParts = c.names
-    .map((n) => ({ n, sets: [...new Set(candsOf(n).filter((k) => !isNormal(k)).map(setOf))] }))
+    .map((n) => ({ name: n, sets: [...new Set(candsOf(n).filter((k) => !isNormal(k)).map(setOf))] }))
     .filter((x) => x.sets.length)
   if (addParts.length > 1 && common(addParts.map((x) => new Set(x.sets))).length === 0) {
-    return `${detail(addParts)} —— w/f/c 纵向叠音必须同属 soft / normal / drum 之一`
+    return {
+      reason: `${detail(addParts)} —— w/f/c 纵向叠音必须同属 soft / normal / drum 之一`,
+      reasonKey: '{detail} —— w/f/c 纵向叠音必须同属 soft / normal / drum 之一',
+      reasonVars: { detail: detail(addParts) },
+      reasonParts: addParts,
+    }
   }
   const normalParts = c.names
-    .map((n) => ({ n, sets: [...new Set(candsOf(n).filter(isNormal).map(setOf))] }))
+    .map((n) => ({ name: n, sets: [...new Set(candsOf(n).filter(isNormal).map(setOf))] }))
     .filter((x) => x.sets.length)
   if (normalParts.length > 1 && common(normalParts.map((x) => new Set(x.sets))).length === 0) {
-    return `${detail(normalParts)} —— 一个物件只有一个 hitnormal 采样组`
+    return {
+      reason: `${detail(normalParts)} —— 一个物件只有一个 hitnormal 采样组`,
+      reasonKey: '{detail} —— 一个物件只有一个 hitnormal 采样组',
+      reasonVars: { detail: detail(normalParts) },
+      reasonParts: normalParts,
+    }
   }
-  return '这些代号的槽位组合不合法（检查 [Define] 里的槽位写法）'
+  return {
+    reason: '这些代号的槽位组合不合法（检查 [Define] 里的槽位写法）',
+    reasonKey: '这些代号的槽位组合不合法（检查 [Define] 里的槽位写法）',
+    reasonVars: {},
+  }
 }
 
-export function planOsuExport(doc: ChartDoc, opts: OsuExportOptions = {}): OsuExportPlan {
+/** 槽位 / 音效组编号的分配结果（不含文本、文件任务，时间轴这种只读展示可以直接用） */
+export interface SlotAssignmentPlan {
+  order: string[]
+  voices: Map<string, ExportVoice>
+  combos: Combo[]
+  occurrences: ComboOccurrence[]
+  groups: ExportGroup[]
+  errors: string[]
+  /** 不阻断导出、但值得提醒的事（例如原谱编号被占用只能改号） */
+  warnings: string[]
+  skippedCombos: Combo[]
+  /** 「没有合法槽位」的那些 error（其余是缺定义之类的致命错误） */
+  noSlotErrors: string[]
+}
+
+/**
+ * 只做「代号 → 槽位 → 音效组编号」的装箱，不生成 .osu 文本。
+ * 导出（planOsuExport）和时间轴的「槽位」视图共用同一份规则，保证看到的编号就是导出用的编号。
+ */
+export function planSlotAssignments(doc: ChartDoc, opts: OsuExportOptions = {}): SlotAssignmentPlan {
   const order = opts.slotOrder?.length ? opts.slotOrder : DEFAULT_SLOT_ORDER
   const errors: string[] = []
   const warnings: string[] = []
+  /** 没有合法槽位的组合：它们不会出现在 samples 里 */
+  const skippedCombos: Combo[] = []
 
   // 1) 代号 -> 音色；没有代号的那条是「白板」（基础 hitnormal）
   const built = buildVoiceMap(doc, order)
@@ -654,7 +863,7 @@ export function planOsuExport(doc: ChartDoc, opts: OsuExportOptions = {}): OsuEx
   const { combos, occurrences } = collectCombos(doc)
   for (const c of combos) {
     for (const n of c.names) {
-      if (!voices.has(n)) errors.push(`${n}：正文里用到，但 [Define] 里没有这个代号`)
+      if (!voices.has(n)) errors.push(T('{name}：正文里用到，但 [Define] 里没有这个代号', { name: n }))
     }
   }
 
@@ -662,40 +871,150 @@ export function planOsuExport(doc: ChartDoc, opts: OsuExportOptions = {}): OsuEx
   const ordered = [...combos].sort((a, b) => b.count - a.count || a.time - b.time)
   const groups: ExportGroup[] = []
   // 编号先后按 [Settings] PreferredIndex：{11,45,14} → 11, 45, 14, 1, 2, 3…
-  const seq = indexSequence(Array.isArray(doc.settings.PreferredIndex) ? doc.settings.PreferredIndex : [])
+  const reserved = new Set((opts.reservedIndices || []).filter((n) => Number.isFinite(n) && n > 0))
+  const seq = indexSequence(Array.isArray(doc.settings.PreferredIndex) ? doc.settings.PreferredIndex : []).filter(
+    (n) => !reserved.has(n),
+  )
+  /** 已经被某个编号组用掉的编号（一个编号只能有一组槽位，否则同名文件会打架） */
+  const usedIndices = new Set<number>()
+  /**
+   * 这份谱是不是「从 .osu 导入的」：只要有一个组合带着正文编号就算。
+   * 导入的谱要尽量复用编号里已有的 hitnormal 文件，避免凭空生成新音频；
+   * 纯手写的谱没有编号，仍按白板语义把 hitnormal 槽位留空。
+   */
+  const reuseNormals = combos.some((c) => c.want != null)
+
+  const nextIndex = (prefer?: number): number => {
+    if (prefer && prefer >= 1 && !usedIndices.has(prefer) && !reserved.has(prefer)) return prefer
+    const free = seq.find((n) => !usedIndices.has(n))
+    if (free) return free
+    let n = 1
+    while (usedIndices.has(n)) n++
+    return n
+  }
+
+  /** 「没有合法槽位」的那些 error（写入 .osu 时要把它们和致命错误分开） */
+  const noSlotErrors: string[] = []
   for (const c of ordered) {
     const sols = assignmentsOf(c, voices, order)
     if (!sols.length) {
-      errors.push(
-        `组合 [${c.names.join(' ')}]（${fmtMs(c.time)}）没有合法的槽位：` +
-          `w/f/c 纵向叠音必须同属 soft/normal/drum 之一，检查这些代号的槽位定义`,
+      skippedCombos.push(c)
+      const msg = T(
+        '组合 [{names}]（{time}）没有合法的槽位：w/f/c 纵向叠音必须同属 soft/normal/drum 之一，检查这些代号的槽位定义',
+        { names: c.names.join(' '), time: fmtMs(c.time) },
       )
+      errors.push(msg)
+      noSlotErrors.push(msg)
       continue
     }
     let placed = false
-    for (const sol of sols) {
-      const g = groups.find((x) => canPlace(x.slots, sol, voices))
-      if (g) {
-        for (const [k, names] of sol.slots) g.slots.set(k, names)
-        c.group = g.index
-        c.assign = sol
-        placed = true
-        break
+    const apply = (g: ExportGroup, sol: Assignment) => {
+      for (const [k, names] of sol.slots) {
+        // 白板空槽不能盖掉编号里已有的 hitnormal 音色（那份文件别的物件还要用）
+        const cur = g.slots.get(k)
+        if (isBlankSlot(names) && cur && !isBlankSlot(cur)) continue
+        g.slots.set(k, names)
       }
-    }
-    if (!placed) {
-      const g: ExportGroup = { index: seq[groups.length] ?? groups.length + 1, slots: new Map() }
-      const sol = sols[0]
-      for (const [k, names] of sol.slots) g.slots.set(k, names)
-      groups.push(g)
       c.group = g.index
       c.assign = sol
     }
+    const create = (sol: Assignment, prefer?: number) => {
+      const index = nextIndex(prefer)
+      const g: ExportGroup = { index, slots: new Map() }
+      apply(g, sol)
+      groups.push(g)
+      usedIndices.add(index)
+      if (c.want && prefer && index !== prefer) {
+        warnings.push(
+          T(
+            '组合 [{names}]（{time}）原谱用编号 {want}，但该编号已经被另一组音效占用，改用编号 {got}（会新写一份音效文件）',
+            { names: c.names.join(' '), time: fmtMs(c.time), want: prefer, got: index },
+          ),
+        )
+      }
+    }
+    /**
+     * 先试「原谱的编号」：导入时正文里的 `<n>` 就是 sampleIndex，
+     * 沿用它导出的文件名才和目录里已有的 `soft-hitclap44.ogg` 对得上。
+     */
+    const tryOriginalIndex = (solutions: Assignment[]): boolean => {
+      const want = c.want
+      if (!want || want < 1 || reserved.has(want)) return false
+      const same = groups.filter((g) => g.index === want)
+      for (const sol of solutions) {
+        for (const g of same) {
+          if (canPlace(g.slots, sol, voices, reuseNormals)) {
+            apply(g, sol)
+            return true
+          }
+        }
+      }
+      if (!same.length && solutions.length) {
+        create(solutions[0], want)
+        return true
+      }
+      return false
+    }
+
+    // 先只用「不混音」的排法：能塞进已有编号就复用，塞不进就为它单开一个编号。
+    // 宁可多一个编号，也不要把两个本来能分开的音效混进同一个槽位。
+    const clean = sols.filter((s) => !s.mixed)
+    placed = tryOriginalIndex(clean)
+    if (!placed) {
+      for (const sol of clean) {
+        const g = groups.find((x) => canPlace(x.slots, sol, voices, reuseNormals))
+        if (g) {
+          apply(g, sol)
+          placed = true
+          break
+        }
+      }
+    }
+    if (!placed && clean.length) {
+      create(clean[0], c.want)
+      placed = true
+    }
+    // 所有排法都必然混音（例如两个代号都只有 sw）时，才退回原来的贪心装箱
+    if (!placed) {
+      placed = tryOriginalIndex(sols)
+    }
+    if (!placed) {
+      for (const sol of sols) {
+        const g = groups.find((x) => canPlace(x.slots, sol, voices, reuseNormals))
+        if (g) {
+          apply(g, sol)
+          placed = true
+          break
+        }
+      }
+      if (!placed) create(sols[0], c.want)
+    }
+    if (c.indexConflict && c.group) {
+      warnings.push(
+        T('组合 [{names}]（{time}）同一时刻有多个音效组编号，一个绿线只能写一个，导出统一用编号 {got}', {
+          names: c.names.join(' '),
+          time: fmtMs(c.time),
+          got: c.group,
+        }),
+      )
+    }
   }
+
+  return { order, voices, combos, occurrences, groups, errors, warnings, skippedCombos, noSlotErrors }
+}
+
+export function planOsuExport(doc: ChartDoc, opts: OsuExportOptions = {}): OsuExportPlan {
+  const warnings: string[] = []
+  const slotPlan = planSlotAssignments(doc, opts)
+  warnings.push(...slotPlan.warnings)
+  const { voices, combos, occurrences, groups, skippedCombos, noSlotErrors } = slotPlan
+  const errors = slotPlan.errors
 
   // 4) [HitObjects]：每一次出现都要一个圆圈，音效组编号在 [TimingPoints] 里给
   const hitObjects: string[] = []
   const moves: SampleMove[] = []
+  /** 时间（整数毫秒）→ 这个时刻要写入的样本；直接写 .osu 时用 */
+  const samples = new Map<number, ComboSample>()
   let objectCount = 0
   for (const occ of occurrences) {
     const c = occ.combo
@@ -719,9 +1038,20 @@ export function planOsuExport(doc: ChartDoc, opts: OsuExportOptions = {}): OsuEx
     const ns = SET_NUM[normalSet || addSet || 'normal']
     const as = SET_NUM[addSet || normalSet || 'normal']
     const vol = Math.max(1, Math.min(100, occ.volume || opts.fallbackVolume || 100))
+    const group = c.group
+    samples.set(occ.time, {
+      bits,
+      normalSet: normalSet || addSet || 'normal',
+      additionSet: addSet || normalSet || 'normal',
+      normalSetNum: ns,
+      additionSetNum: as,
+      group,
+      volume: vol,
+      names: [...c.names],
+    })
     // 后两段固定 0:0：编号和音量交给绿线，物件本体保持编辑器能写出来的样子
     hitObjects.push(`256,192,${occ.time},1,${bits},${ns}:${as}:0:0:`)
-    moves.push({ time: occ.time, index: c.group, volume: vol, set: as })
+    moves.push({ time: occ.time, index: group, volume: vol, set: as })
     objectCount++
   }
 
@@ -745,10 +1075,16 @@ export function planOsuExport(doc: ChartDoc, opts: OsuExportOptions = {}): OsuEx
       // 全是 default：osu 自己会用内置音效，不用复制
       if (!hasCustom) continue
       const single = parts.length === 1 ? parts[0] : null
-      const to = `${k}${g.index === 1 ? '' : g.index}${single ? single.ext : '.wav'}`
       const from = parts.filter((v) => v.file).map((v) => v.file)
       const defaults = parts.filter((v) => !v.file && v.defaultRef).map((v) => v.defaultRef)
       const mix = from.length + defaults.length > 1
+      /**
+       * 源文件是无编号的基础名（soft-hitclap.ogg），但这一组用的编号不是 1：
+       * osu 找 soft-hitclap44 时会回落到 soft-hitclap，不需要把基础文件复制成 44。
+       * 不跳过的话，每次导出都会凭空多出一份「新」音频。
+       */
+      if (!mix && single && g.index !== 1 && fileSampleIndex(single.file) === 1) continue
+      const to = `${k}${g.index === 1 ? '' : g.index}${single ? single.ext : '.wav'}`
       /** 混音落点：同一编号里这个槽位装了多个音效的那些时刻 */
       const mixTimes = mix
         ? (occByGroup.get(g.index) || [])
@@ -790,8 +1126,10 @@ export function planOsuExport(doc: ChartDoc, opts: OsuExportOptions = {}): OsuEx
   const timingLines = timingPlan.lines.map((l) => ({ ...l, sampleSet: 2 }))
   if (objectCount > 20 && timingPlan.added > objectCount / 3) {
     warnings.push(
-      `这份谱要在 ${objectCount} 个物件之间来回切音效组，补了 ${timingPlan.added} 条绿线。` +
-        `如果这不是本意，可以在导入音效时把基础 hitnormal 设成白板，让更多组合共用一个编号。`,
+      T(
+        '这份谱要在 {objects} 个物件之间来回切音效组，补了 {added} 条绿线。如果这不是本意，可以在导入音效时把基础 hitnormal 设成白板，让更多组合共用一个编号。',
+        { objects: objectCount, added: timingPlan.added },
+      ),
     )
   }
 
@@ -803,12 +1141,15 @@ export function planOsuExport(doc: ChartDoc, opts: OsuExportOptions = {}): OsuEx
     groups,
     files,
     errors: [...new Set(errors)],
+    noSlotErrors: [...new Set(noSlotErrors)],
     warnings,
+    skippedCombos,
     comboCount: combos.length,
     mixCount,
     objectCount,
     timing: timingLines,
     greenLines: timingPlan.added,
+    samples,
     text,
   }
 }

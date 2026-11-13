@@ -18,12 +18,22 @@ import {
   type Priority,
 } from '../core/rhythmColors'
 import { onRevealTime } from '../core/reveal'
+import { parseSlotKey, planSlotAssignments } from '../core/osuExport'
+import { loadExportPrefs } from '../core/exportPrefs'
 import { IconMetronome, IconPause, IconPlay, IconStop } from './Icons'
 import VolumeControl from './VolumeControl'
 import { t as tr } from '../i18n'
 
 /** 卷帘里每条谱表用的颜色 */
 const STAFF_COLORS = ['#3ec5ff', '#ffb347', '#8be78b', '#ff8ab5', '#c39bff', '#ffe28a']
+
+/** 槽位视图：固定 4 行，按打击类型分（osu 的 4 个 hit 槽位） */
+const SLOT_LANES = ['hitnormal', 'hitwhistle', 'hitfinish', 'hitclap'] as const
+type SlotLane = (typeof SLOT_LANES)[number]
+/** 采样组颜色：soft / normal / drum */
+const SET_COLORS: Record<string, string> = { soft: '#3ec5ff', normal: '#ffb347', drum: '#8be78b' }
+const SET_ABBR: Record<string, string> = { soft: 's', normal: 'n', drum: 'd' }
+const HIT_ABBR: Record<SlotLane, string> = { hitnormal: '', hitwhistle: 'w', hitfinish: 'f', hitclap: 'c' }
 
 interface Props {
   doc: ChartDoc
@@ -108,8 +118,8 @@ export default function Timeline({ doc, theme, onPlaySample }: Props) {
     () => doc.events.filter((e) => e.kind === 'keysound' && typeof e.pitch === 'number'),
     [doc],
   )
-  /** lanes = 现有音效名分行视图；roll = keysound 钢琴卷帘 */
-  const [view, setView] = useState<'lanes' | 'roll'>('lanes')
+  /** lanes = 现有音效名分行视图；roll = keysound 钢琴卷帘；slots = 4 行槽位视图 */
+  const [view, setView] = useState<'lanes' | 'roll' | 'slots'>('lanes')
   const [viewPinned, setViewPinned] = useState(false)
   const [rollScroll, setRollScroll] = useState(0)
   /** 音效行视图的竖向滚动（音效名太多、行数超出可视高度时用） */
@@ -152,6 +162,45 @@ export default function Timeline({ doc, theme, onPlaySample }: Props) {
     g.high - Math.floor((my - HEADER_H + Math.min(rollScroll, g.maxScroll)) / g.rowH)
 
   const isRoll = view === 'roll' && ksEvents.length > 0
+  const isSlots = view === 'slots'
+
+  /**
+   * 槽位视图要显示的编号就是导出时用的编号：直接跑导出的装箱（不生成 .osu 文本），
+   * 所以和「审阅 → 重复槽位」「导出音效映射」里的编号永远一致。
+   */
+  const slotPlan = useMemo(() => {
+    if (view !== 'slots') return null
+    try {
+      return planSlotAssignments(doc, { slotOrder: loadExportPrefs().slotOrder })
+    } catch {
+      return null
+    }
+  }, [doc, view])
+
+  /** 每个音符（非 keysound）落在哪个槽位、用哪个音效组编号 */
+  const slotNotes = useMemo(() => {
+    const map = new Map<NoteEvent, { set: string; hit: SlotLane; group: number | null }>()
+    if (!slotPlan) return map
+    const occByTime = new Map<number, (typeof slotPlan.occurrences)[number]>()
+    for (const o of slotPlan.occurrences) occByTime.set(o.time, o)
+    for (const e of doc.events) {
+      if (e.kind === 'keysound') continue
+      const name = e.names[0]
+      if (!name) continue
+      const occ = occByTime.get(Math.floor(e.time + 1e-6))
+      // 优先用装箱选中的槽位；组合不合法时退回代号自己的第一个候选，至少能看出「本来想去哪」
+      const picked = occ?.combo.assign?.byName.get(name)
+      const key = picked || slotPlan.voices.get(name)?.cands[0]
+      const ref = key ? parseSlotKey(key) : null
+      if (!ref) continue
+      map.set(e, {
+        set: ref.set,
+        hit: ref.hit as SlotLane,
+        group: occ?.combo.group ?? null,
+      })
+    }
+    return map
+  }, [doc, slotPlan])
 
   // 谱面自身的小节 + 有音频时延伸到歌曲末尾的虚拟小节
   const gridMeasures = useMemo<MeasureInfo[]>(() => {
@@ -278,7 +327,7 @@ export default function Timeline({ doc, theme, onPlaySample }: Props) {
       if (isRoll) {
         const g = rollGeom(sizeRef.current.h - PROG_H)
         setRollScroll((v) => Math.max(0, Math.min(g.maxScroll, v + e.deltaY)))
-      } else {
+      } else if (!isSlots) {
         const g = laneGeom(sizeRef.current.h - PROG_H)
         setLaneScroll((v) => Math.max(0, Math.min(g.maxScroll, v + e.deltaY)))
       }
@@ -364,7 +413,7 @@ export default function Timeline({ doc, theme, onPlaySample }: Props) {
     const start = startRef.current
     const x = (t: number) => GUTTER + (t - start) * pxPerMs
     const lg = laneGeom(mainH)
-    const ls = isRoll ? 0 : Math.min(laneScroll, lg.maxScroll)
+    const ls = isRoll || isSlots ? 0 : Math.min(laneScroll, lg.maxScroll)
 
     ctx.fillStyle = bg
     ctx.fillRect(0, 0, w, mainH)
@@ -413,8 +462,8 @@ export default function Timeline({ doc, theme, onPlaySample }: Props) {
         }
       }
     } else {
-      // 泳道背景（按音效名分行）—— 支持竖向滚动，超出部分裁在表头/底边之外
-      const laneCount = lg.count
+      // 泳道背景：音效行按音效名分行（可竖向滚动）；槽位视图固定 4 行（按打击类型）
+      const laneCount = isSlots ? SLOT_LANES.length : lg.count
       for (let i = 0; i < laneCount; i++) {
         const y = HEADER_H + i * LANE_H - ls
         if (y + LANE_H < HEADER_H || y > mainH) continue
@@ -438,23 +487,47 @@ export default function Timeline({ doc, theme, onPlaySample }: Props) {
       ctx.moveTo(GUTTER + 0.5, 0)
       ctx.lineTo(GUTTER + 0.5, mainH)
       ctx.stroke()
-      ctx.font = '600 11px ui-monospace, Consolas, monospace'
-      ctx.fillStyle = accent
       ctx.textBaseline = 'middle'
-      for (let i = 0; i < laneCount; i++) {
-        const y = HEADER_H + i * LANE_H + LANE_H / 2 - ls
-        if (y < HEADER_H + 6 || y > mainH - 4) continue
-        ctx.fillText(codeGlyph(lanes[i]).slice(0, 9), 8, y)
-      }
-      // 竖向滚动条：行数超出可视高度时贴在名字栏右侧，提示这里可以滚
-      if (lg.maxScroll > 0) {
-        const viewH = Math.max(1, lg.viewH)
-        const thumbH = Math.max(24, (viewH / lg.contentH) * viewH)
-        const thumbY = HEADER_H + (ls / lg.maxScroll) * Math.max(0, viewH - thumbH)
+      if (isSlots) {
+        // 槽位视图：行名就是 osu 的 4 个打击类型，具体 set 由方块颜色表示
+        ctx.font = '600 10px ui-monospace, Consolas, monospace'
+        ctx.fillStyle = dim
+        for (let i = 0; i < laneCount; i++) {
+          const y = HEADER_H + i * LANE_H + LANE_H / 2 - ls
+          if (y < HEADER_H + 6 || y > mainH - 4) continue
+          ctx.fillText(SLOT_LANES[i], 8, y)
+        }
+        // 四行下方通常还有空白，正好放采样组图例（不占工具条宽度）
+        const ly = HEADER_H + laneCount * LANE_H + 12
+        if (ly < mainH - 40) {
+          ctx.font = '9px ui-monospace, Consolas, monospace'
+          ;(['soft', 'normal', 'drum'] as const).forEach((s, i) => {
+            const y = ly + i * 13
+            if (y > mainH - 4) return
+            ctx.fillStyle = SET_COLORS[s]
+            ctx.fillRect(8, y - 4, 8, 8)
+            ctx.fillStyle = dim
+            ctx.fillText(s, 20, y)
+          })
+        }
+      } else {
+        ctx.font = '600 11px ui-monospace, Consolas, monospace'
         ctx.fillStyle = accent
-        ctx.globalAlpha = 0.35
-        ctx.fillRect(GUTTER - 3, thumbY, 2.5, thumbH)
-        ctx.globalAlpha = 1
+        for (let i = 0; i < laneCount; i++) {
+          const y = HEADER_H + i * LANE_H + LANE_H / 2 - ls
+          if (y < HEADER_H + 6 || y > mainH - 4) continue
+          ctx.fillText(codeGlyph(lanes[i] || '').slice(0, 9), 8, y)
+        }
+        // 竖向滚动条：行数超出可视高度时贴在名字栏右侧，提示这里可以滚
+        if (lg.maxScroll > 0) {
+          const viewH = Math.max(1, lg.viewH)
+          const thumbH = Math.max(24, (viewH / lg.contentH) * viewH)
+          const thumbY = HEADER_H + (ls / lg.maxScroll) * Math.max(0, viewH - thumbH)
+          ctx.fillStyle = accent
+          ctx.globalAlpha = 0.35
+          ctx.fillRect(GUTTER - 3, thumbY, 2.5, thumbH)
+          ctx.globalAlpha = 1
+        }
       }
     }
 
@@ -539,6 +612,8 @@ export default function Timeline({ doc, theme, onPlaySample }: Props) {
     ctx.rect(GUTTER, HEADER_H, Math.max(0, w - GUTTER), Math.max(0, mainH - HEADER_H))
     ctx.clip()
     const first = Math.max(0, findFirst(doc.events, start - 500))
+    /** 槽位视图：每行最后一个标签的右边界，挤不下就不画标签（只留颜色块） */
+    const slotLabelRight = SLOT_LANES.map(() => -Infinity)
     for (let i = first; i < doc.events.length; i++) {
       const e = doc.events[i]
       if (e.time > start + visibleMs + 500) break
@@ -575,6 +650,43 @@ export default function Timeline({ doc, theme, onPlaySample }: Props) {
           ctx.fillStyle = theme === 'dark' ? '#101010' : '#ffffff'
           ctx.font = '8px ui-monospace, Consolas, monospace'
           ctx.fillText(midiToName(e.pitch), nx + 2, y)
+        }
+        continue
+      }
+      if (isSlots) {
+        const info = slotNotes.get(e)
+        if (!info) continue
+        const li = SLOT_LANES.indexOf(info.hit)
+        if (li < 0) continue
+        const y = HEADER_H + li * LANE_H + LANE_H / 2 - ls
+        if (y < HEADER_H - LANE_H || y > mainH + LANE_H) continue
+        ctx.globalAlpha = alpha
+        ctx.fillStyle = SET_COLORS[info.set] || accent
+        ctx.beginPath()
+        const bh = 12
+        ctx.roundRect ? ctx.roundRect(nx, y - bh / 2, bw, bh, 3) : ctx.rect(nx, y - bh / 2, bw, bh)
+        ctx.fill()
+        ctx.globalAlpha = 1
+        // 组合排不出槽位（导出会被跳过）：虚线框提示，编号显示 ?
+        if (info.group == null) {
+          ctx.strokeStyle = dim
+          ctx.lineWidth = 1
+          ctx.setLineDash([2, 2])
+          ctx.stroke()
+          ctx.setLineDash([])
+        }
+        // 标签 = 槽位缩写 + 音效组编号（sw3 / s2 …）；和上一个标签挤在一起就省略
+        if (ppsec >= 55) {
+          const abbr = `${SET_ABBR[info.set] || ''}${HIT_ABBR[info.hit] || ''}`
+          const label = `${abbr}${info.group ?? '?'}`
+          ctx.font = '9px ui-monospace, Consolas, monospace'
+          const tw = ctx.measureText(label).width
+          const tx = nx + bw + 3
+          if (tx > slotLabelRight[li] && tx + tw <= w) {
+            ctx.fillStyle = dim
+            ctx.fillText(label, tx, y)
+            slotLabelRight[li] = tx + tw + 7
+          }
         }
         continue
       }
@@ -762,6 +874,19 @@ export default function Timeline({ doc, theme, onPlaySample }: Props) {
       }
       return { time: Math.max(0, t), lane: undefined, event: best }
     }
+    // 槽位视图：先按 y 找到打击类型行，再在 120ms 内找这一行的音符
+    if (isSlots) {
+      const li = Math.max(0, Math.min(SLOT_LANES.length - 1, Math.floor((my - HEADER_H) / LANE_H)))
+      const hit = SLOT_LANES[li]
+      let best: NoteEvent | null = null
+      for (const e of doc.events) {
+        if (e.time < t - 120) continue
+        if (e.time > t + 120) break
+        if (slotNotes.get(e)?.hit !== hit) continue
+        if (!best || Math.abs(e.time - t) < Math.abs(best.time - t)) best = e
+      }
+      return { time: Math.max(0, t), lane: hit, event: best }
+    }
     const lg = laneGeom(sizeRef.current.h - PROG_H)
     const li = Math.floor((my - HEADER_H + Math.min(laneScroll, lg.maxScroll)) / LANE_H)
     const lane = lanes[li]
@@ -910,6 +1035,16 @@ export default function Timeline({ doc, theme, onPlaySample }: Props) {
             }}
           >
             {tr('钢琴卷帘')}
+          </button>
+          <button
+            className={`tl-seg ${isSlots ? 'on' : ''}`}
+            title={tr('槽位视图：每个音效落在哪个槽位、用哪个音效组编号')}
+            onClick={() => {
+              setViewPinned(true)
+              setView('slots')
+            }}
+          >
+            {tr('槽位')}
           </button>
         </label>
         <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>

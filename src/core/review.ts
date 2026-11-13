@@ -93,7 +93,10 @@ export function usageReport(doc: ChartDoc): UsageReport {
       first: st?.first ?? null,
       last: st?.last ?? null,
       color: h.color,
-      slots: h.alts.map((a) => (a.custom ? 'custom' : `${a.sampleSet}-${a.hitType}`)),
+      slots: [
+        ...h.alts.map((a) => (a.custom ? 'custom' : `${a.sampleSet}-${a.hitType}`)),
+        ...(h.subSlots || []),
+      ],
       defined: true,
       keysound: h.kind === 'keysound',
       file: (h.resolvedPath || '').split(/[\\/]/).pop() || '',

@@ -135,9 +135,9 @@ const musictxt = StreamLanguage.define<St>({
         stream.match(/^[A-Za-z0-9_]*/)
         return 'phraseName'
       }
-      if (stream.match(/^(soft|normal|drum)(-(hitnormal|hitwhistle|hitfinish|hitclap|sliderside|slidertick))?/))
+      if (stream.match(/^(soft|normal|drum)(-(hitnormal|hitwhistle|hitfinish|hitclap|sliderside|sliderslide|slidertick|successor))?/))
         return 'slot'
-      if (stream.match(/^(sliderside|slidertick)\b/)) return 'slot'
+      if (stream.match(/^(sliderside|sliderslide|slidertick|successor)\b/)) return 'slot'
       if (stream.match(/^(custom)\b/)) return 'slot'
       if (stream.match(/^\{([\d,()\s]*)\}?/)) return 'braceList'
       if (ch === '|') {

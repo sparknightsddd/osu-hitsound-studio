@@ -108,7 +108,10 @@ export function editHitsoundDefineText(
   let slotText = m[2]
   if (opts.slots !== undefined) {
     const slots = opts.slots.filter((x) => isSlotName(x))
-    slotText = slots.length ? slots.join('|') : 'custom'
+    const main = slots.length ? slots.join('|') : 'custom'
+    // 副槽位不在「音效设置」的复选框里，改主槽位 / 颜色 / 代号时原样保留
+    const subs = def.subSlots || []
+    slotText = subs.length ? `${main}|${subs.join('|')}` : main
   }
   // 只换「槽位」「代号」两个 token；值、颜色、行尾其它内容原样保留
   let newLine = m[1] + slotText + m[3] + nextName + line.slice(m[0].length)

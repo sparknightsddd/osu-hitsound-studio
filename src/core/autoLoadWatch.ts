@@ -12,7 +12,7 @@ import { useStore } from '../store'
 import { engine } from '../audio/engine'
 import { desktopApi } from './desktop'
 import { resolvePath } from './parse'
-import { keySampleName, singleKeyName } from './keysound'
+import { keySampleName } from './keysound'
 
 /** 一个待载入目标 */
 interface Target {
@@ -59,13 +59,14 @@ function collectTargets(): Target[] {
   }
 
   for (const h of doc.hitsounds) {
-    if (!h.name || h.defaultRef || h.soundFont) continue // default.xxx 走内置库；.sf2/.sf3 暂不支持解码
-    // 2) 单文件定义（hitsound / 单一 wav 的 keysound）
-    if (h.resolvedPath && isAbs(h.resolvedPath)) {
+    // default.xxx 走内置库；sf2/sf3/sfz/单一音频用 key layout 整体载入，不在这里逐个绑定
+    if (!h.name || h.defaultRef || h.keys?.mode === 'singlefile' || h.soundFont) continue
+    // 2) hitsound 单文件（keysound 单文件/音色库整体走 autoLoadAssets 的 key layout）
+    if (h.kind === 'hitsound' && h.resolvedPath && isAbs(h.resolvedPath)) {
       out.push({
         diskPath: diskPath(h.resolvedPath),
         key: normKey(h.resolvedPath),
-        sampleName: h.kind === 'keysound' ? singleKeyName(h.name) : h.name,
+        sampleName: h.name,
         label: h.name,
       })
     }
@@ -116,15 +117,18 @@ async function run() {
   const bindings = { ...useStore.getState().bindings }
   const loaded: string[] = []
   for (const t of targets) {
-    if (processed.has(t.key)) continue
+    // 缓存键必须带上样本名：同一个文件改代号后（Aa → Bb）路径没变，
+    // 只按路径去重会把新代号当成「已处理过」直接跳过，表现就是改名后不加载。
+    const ck = `${t.sampleName || ''}\u0000${t.key}`
+    if (processed.has(ck)) continue
     if (!t.sampleName && songDone.has(t.key)) {
-      processed.set(t.key, true)
+      processed.set(ck, true)
       continue
     }
     const bin = await api.readBinary(t.diskPath)
     if (my !== seq) return // 期间文本又变了/切谱了 → 丢弃这轮
     if (!bin.ok || !bin.data) {
-      processed.set(t.key, false)
+      processed.set(ck, false)
       log(`✗ 按文本路径载入 ${t.label} 失败：读不到 ${t.diskPath}`)
       continue
     }
@@ -143,10 +147,10 @@ async function run() {
         await engine.loadSong(file)
         songDone.add(t.key)
       }
-      processed.set(t.key, true)
+      processed.set(ck, true)
       loaded.push(t.label)
     } catch (err) {
-      processed.set(t.key, false)
+      processed.set(ck, false)
       log(`✗ 按文本路径载入 ${t.label} 失败：${fileName} 解码不了（${String(err).slice(0, 120)}）`)
     }
   }

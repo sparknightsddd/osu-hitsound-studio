@@ -257,6 +257,63 @@ console.log('JUMP', before, '->', after)
 T('点时间后窗口关闭', JSON.parse(after).dlg === false, after)
 T('底部切到时间轴', JSON.parse(after).panel === 'timeline' && JSON.parse(after).open === true, after)
 T('播放头到了 8000ms', JSON.parse(after).now === 8000, after)
+// 5) 英文界面：冲突原因、空状态、三个页签都不能留中文
+await ev(`window.__i18n.setLang('en-US')`)
+await wait(450)
+await ev(`window.__openReview('conflict')`)
+await wait(450)
+const enReason = String(await ev(`document.querySelector('.rv-dialog .rv-reason')?.textContent.trim() || ''`))
+T('英文：冲突原因已翻译', /belong to/.test(enReason) && !/[\u4e00-\u9fff]/.test(enReason), enReason)
+const enTabs = JSON.parse(
+  await ev(`JSON.stringify([...document.querySelectorAll('.rv-tabs .set-tab')].map((b) => b.textContent.trim()))`),
+)
+T(
+  '英文：三个页签已翻译',
+  enTabs.length === 3 && !enTabs.some((x) => /[\u4e00-\u9fff]/.test(x)) && /Slot conflicts/.test(enTabs[1]),
+  JSON.stringify(enTabs),
+)
+
+// 没有任何冲突的谱面 → 空状态
+const clean = `[Metadata]
+Title = Clean
+Artist = Tester
+
+[Files]
+path = "${DIR.replace(/\\/g, '/')}"
+audio = "song.wav"
+
+[Define]
+hitsound soft-hitclap A = "a.wav"
+
+[Timing]
+0,bpm(120),4,0,0
+
+[Hitsound]
+#0
+/A = = =/`
+await ev(`(() => {
+  const s = window.__store.getState()
+  const id = s.addFile('review-clean.hs', ${JSON.stringify(clean)})
+  s.setActive(id)
+  return 'ok'
+})()`)
+await wait(800)
+await ev(`window.__openReview('conflict')`)
+await wait(450)
+const empty = String(await ev(`document.querySelector('.rv-dialog .rv-empty.ok')?.textContent.trim() || ''`))
+T('英文：无冲突空状态已翻译', /No slot conflicts/.test(empty) && !/[\u4e00-\u9fff]/.test(empty), empty)
+console.log('SHOT_EN', await shotEl('.rv-dialog', 'ui-review-en' + SUF + '.png', 2, 6))
+
+// 重复槽位 / 使用次数两页同样不能有中文
+await ev(`[...document.querySelectorAll('.rv-tabs .set-tab')][2].click()`)
+await wait(300)
+const dupEmpty = String(await ev(`document.querySelector('.rv-dialog .rv-empty.ok')?.textContent.trim() || ''`))
+T('英文：无重复槽位空状态已翻译', /No duplicate slot sounds/.test(dupEmpty) && !/[\u4e00-\u9fff]/.test(dupEmpty), dupEmpty)
+await ev(`[...document.querySelectorAll('.rv-tabs .set-tab')][0].click()`)
+await wait(300)
+const enAll = String(await ev(`document.querySelector('.rv-dialog').innerText`))
+T('英文：审阅窗没有残留中文', !/[\u4e00-\u9fff]/.test(enAll), (enAll.match(/[\u4e00-\u9fff]+/g) || []).join(','))
+
 console.log('STATUS', await ev(`(document.querySelector('.statusbar') || {}).textContent || ''`))
 
 console.log('ERRORS', JSON.stringify(errors.slice(0, 5)))

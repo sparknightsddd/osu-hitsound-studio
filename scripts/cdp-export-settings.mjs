@@ -72,9 +72,15 @@ async function shot(name) {
 await send('Runtime.enable')
 await send('Page.enable')
 await wait(2800)
+// 断言用的是中文文案：先强制中文，避免上次运行留下的 en-US 影响
+await ev(`window.__i18n.setLang('zh-CN'); 1`)
+await wait(400)
 
 await ev(`localStorage.removeItem('hsstudio.export'); window.__openAppSettings(); 1`)
 await wait(500)
+// 设置窗会停在上次看的页，显式切到「导出」（第 5 个页签）
+await ev(`document.querySelectorAll('.set-tab')[4]?.click(); 1`)
+await wait(300)
 
 console.log(
   'UI',
@@ -131,6 +137,8 @@ console.log('OPEN', await ev(`!!document.querySelector('.set-dialog')`))
 await wait(400)
 await ev(`window.__openAppSettings(); 1`)
 await wait(400)
+await ev(`document.querySelectorAll('.set-tab')[4]?.click(); 1`)
+await wait(250)
 console.log(
   'REOPEN',
   await ev(`(() => {

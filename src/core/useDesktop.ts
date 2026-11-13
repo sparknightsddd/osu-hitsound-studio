@@ -11,6 +11,7 @@ import {
   exportJson,
   exportOsu,
   exportOsuPackage,
+  writeOsuHitsounds,
   exportTxt,
   newChart,
   openChartDir,
@@ -23,6 +24,7 @@ import {
 } from './actions'
 import { engine } from '../audio/engine'
 import { openAppSettings } from '../components/AppSettingsDialog'
+import { openKeysoundImport } from '../components/KeysoundImportDialog'
 import { openReview, type ReviewKind } from '../components/ReviewDialog'
 
 export { isDesktop }
@@ -90,8 +92,12 @@ export function useDesktopBridge() {
           return void importOsu()
         case 'importSounds':
           return void importOsuSounds()
+        case 'importKeysound':
+          return openKeysoundImport()
         case 'exportOsuPackage':
           return void exportOsuPackage()
+        case 'writeOsuHitsounds':
+          return void writeOsuHitsounds()
         case 'exportOsu':
           return void exportOsu()
         case 'exportCsv':

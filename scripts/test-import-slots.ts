@@ -79,15 +79,16 @@ async function main() {
     rmSync(dir, { recursive: true, force: true })
   }
 
-  // 3) 同一个文件被两个槽位共用（内容相同）→ 只能 custom
+  // 3) 两个槽位用了内容相同的文件 → 各自保留自己的槽位（不要合成一个 custom）
   {
     const dir = mkdtempSync(join(tmpdir(), 'hsslots2-'))
     writeFileSync(join(dir, 'soft-hitclap.wav'), 'same')
     writeFileSync(join(dir, 'drum-hitclap.wav'), 'same')
     const res = await extractOsuSounds(OSU, envFor(dir, () => 'same-hash') as never)
     const define = defineOf(res)
-    ok(/hitsound custom \w+ = "soft-hitclap\.wav"/.test(define), `共用文件退回 custom：\n${define.trim()}`)
-    ok(!/hitsound (soft|drum)-hitclap/.test(define), '不会只写成其中一个槽位')
+    ok(/hitsound soft-hitclap \w+ = "soft-hitclap\.wav"/.test(define), `soft 保留自己的槽位：\n${define.trim()}`)
+    ok(/hitsound drum-hitclap \w+ = "drum-hitclap\.wav"/.test(define), 'drum 也保留自己的槽位')
+    ok(!/hitsound custom/.test(define), '不再退回 custom')
     rmSync(dir, { recursive: true, force: true })
   }
 

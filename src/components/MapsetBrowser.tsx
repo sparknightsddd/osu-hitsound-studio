@@ -6,6 +6,7 @@
  * 点一行就直接导入，省掉「文件 → 导入 → 挑文件」三步。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { t } from '../i18n'
 import {
   IconFolder,
   IconMapset,
@@ -23,7 +24,6 @@ import {
 } from '../core/osuMapsets'
 import { importMapset } from '../core/actions'
 import { openAppSettings } from './AppSettingsDialog'
-import { t } from '../i18n'
 
 const PAGE = 60
 /** 带搜索词时一次多取一些：过滤是在服务端按页做的，页太小会漏 */
@@ -76,8 +76,8 @@ export default function MapsetBrowser() {
       if (!page.ok) {
         setError(
           page.error === 'songs_folder_not_found'
-            ? '没找到 osu! Songs 目录，去「设置」里手动指定'
-            : page.error || '读取失败',
+            ? t('没找到 osu! Songs 目录，去「设置」里手动指定')
+            : page.error || t('读取失败'),
         )
         setItems([])
         setTotal(0)
@@ -247,7 +247,9 @@ export default function MapsetBrowser() {
 
       {hasMore && !loading && (
         <button className="ms-more" disabled={loadingMore} onClick={() => void load(false, q)}>
-          {loadingMore ? '正在加载…' : `加载更多（还有 ${Math.max(0, total - items.length)} 个）`}
+          {loadingMore
+            ? t('正在加载…')
+            : t('加载更多（还有 {n} 个）', { n: Math.max(0, total - items.length) })}
         </button>
       )}
     </>
@@ -271,7 +273,7 @@ function MapsetRow({
   return (
     <div
       className={`ms-item ${isBusy ? 'busy' : ''}`}
-      title={`${m.folder}\n${m.artist} - ${m.title}${m.creator ? ` / ${m.creator}` : ''}\n${m.diffCount} 个难度`}
+      title={`${m.folder}\n${m.artist} - ${m.title}${m.creator ? ` / ${m.creator}` : ''}\n${t('{n} 个难度', { n: m.diffCount })}`}
       onClick={onImport}
     >
       <div className="ms-line1">

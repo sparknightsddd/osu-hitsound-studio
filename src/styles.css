@@ -2043,6 +2043,28 @@ svg.i.fill {
   align-items: center;
   gap: 8px;
 }
+/* 渐变音量：起始 / 结束 / 间隔 三列 */
+.gd-fade-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+.gd-fade-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.gd-fade-grid .gd-vol-input {
+  width: 100%;
+  font-size: 14px;
+  padding: 4px 6px;
+}
+.gd-fade-grid .hint {
+  line-height: 1.35;
+  /* 英文/俄文的第三个标签会折成两行；给所有标签留同样高度，三个输入框才会对齐 */
+  min-height: 30px;
+}
 .gd-vol-foot .hint {
   flex: 1;
   color: var(--warn);
@@ -3066,4 +3088,129 @@ svg.i.fill {
   color: var(--text-dim);
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* ---------- 导入 MIDI / musictxt 到 [Keysound] ---------- */
+.ki-dialog {
+  width: min(720px, 94vw);
+  max-height: 86vh;
+}
+.ki-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.ki-sec {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.ki-sec-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.ki-tracks,
+.ki-staves {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 190px;
+  overflow: auto;
+  padding: 2px 0;
+}
+.ki-track {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.ki-track:hover {
+  background: var(--hover);
+}
+.ki-track.on {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.ki-track-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ki-track-meta {
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+.ki-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) auto auto;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.ki-label {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.ki-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 10px;
+}
+.ki-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.ki-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.ki-link {
+  border: 0;
+  background: none;
+  padding: 0 4px;
+  color: var(--accent);
+  font-family: var(--ui);
+  font-size: 11px;
+  cursor: pointer;
+}
+.ki-link:hover {
+  text-decoration: underline;
+}
+.ki-preview {
+  font-size: 12px;
+  background: var(--bg-alt);
+}
+.ki-preview-meta {
+  margin-left: 8px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+.ki-warn {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--warn);
+  font-size: 11px;
+}
+.ki-warn .ki-note {
+  color: var(--text-faint);
 }

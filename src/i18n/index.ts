@@ -15,7 +15,14 @@
 import { useStore } from '../store'
 import { desktopApi } from '../core/desktop'
 import zhCN from './langs/zh-CN.lang?raw'
+import zhTW from './langs/zh-TW.lang?raw'
 import enUS from './langs/en-US.lang?raw'
+import jaJP from './langs/ja-JP.lang?raw'
+import koKR from './langs/ko-KR.lang?raw'
+import ruRU from './langs/ru-RU.lang?raw'
+import { AUTO_LANG, matchLangTag, pickSystemLang, systemLangTags } from './match'
+
+export { AUTO_LANG } from './match'
 
 export interface LangPack {
   /** BCP-47 风格，如 zh-CN / en-US */
@@ -101,7 +108,7 @@ export function isBuiltinLang(id: string): boolean {
 
 /** msgid → 当前语言文本；缺失时回落到中文原文 */
 export function t(msg: string, vars?: Record<string, string | number>): string {
-  let s = current.messages[msg]
+  let s: string | undefined = current.messages[msg]
   if (s === undefined) s = msg
   if (vars) {
     s = s.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? String(vars[k]) : m))
@@ -123,19 +130,42 @@ function persist(id: string) {
   }
 }
 
-/** 设置界面语言；找不到包就回落到中文 */
+/**
+ * 当前语言选择：'auto'（跟随系统）或具体语言包 id。
+ * 设置页下拉框用它做 value；currentLang() 给的是解析后的实际语言包。
+ */
+export function langSelection(): string {
+  try {
+    const saved = localStorage.getItem(LS_LANG)
+    if (!saved || saved === AUTO_LANG) return AUTO_LANG
+    return listLangs().some((p) => p.id === saved) ? saved : AUTO_LANG
+  } catch {
+    return AUTO_LANG
+  }
+}
+
+/** 'auto' 或具体 id → 实际语言包 */
+function packForSelection(sel: string): LangPack | undefined {
+  const list = listLangs()
+  if (sel === AUTO_LANG) return list.find((p) => p.id === pickSystemLang(systemLangTags()))
+  return list.find((p) => p.id === sel)
+}
+
+/** 设置界面语言；'auto' = 跟随系统；找不到包就回落到中文 */
 export function setLang(id: string, opts: { persist?: boolean } = {}) {
-  const pack = listLangs().find((p) => p.id === id) || listLangs().find((p) => p.id === 'zh-CN')
+  const requested =
+    id === AUTO_LANG ? AUTO_LANG : listLangs().some((p) => p.id === id) ? id : 'zh-CN'
+  const pack = packForSelection(requested) || listLangs().find((p) => p.id === 'zh-CN')
   if (!pack) return
   current = pack
-  if (opts.persist !== false) persist(pack.id)
+  if (opts.persist !== false) persist(requested)
   try {
     document.documentElement.lang = pack.id
   } catch {
     /* ignore */
   }
-  // 原生菜单也跟着换
-  void desktopApi()?.setAppLang?.(pack.id)
+  // 原生菜单只做了中/英两套：中文（简/繁）用中文菜单，其余语言用英文菜单
+  void desktopApi()?.setAppLang?.(pack.id === 'zh-CN' || pack.id === 'zh-TW' ? 'zh-CN' : 'en-US')
   emit()
 }
 
@@ -193,12 +223,13 @@ export async function initI18n(): Promise<void> {
   }
   const saved = (() => {
     try {
-      return localStorage.getItem(LS_LANG) || 'zh-CN'
+      return localStorage.getItem(LS_LANG) || AUTO_LANG
     } catch {
-      return 'zh-CN'
+      return AUTO_LANG
     }
   })()
-  const pack = listLangs().find((p) => p.id === saved) || listLangs()[0]
+  const sel = saved === AUTO_LANG || listLangs().some((p) => p.id === saved) ? saved : AUTO_LANG
+  const pack = packForSelection(sel) || listLangs()[0]
   current = pack
   try {
     document.documentElement.lang = pack.id
@@ -206,7 +237,13 @@ export async function initI18n(): Promise<void> {
     /* ignore */
   }
   // 让原生菜单和界面保持一致（也把选择写进 prefs，下次启动直接生效）
-  void desktopApi()?.setAppLang?.(pack.id)
+  void desktopApi()?.setAppLang?.(pack.id === 'zh-CN' || pack.id === 'zh-TW' ? 'zh-CN' : 'en-US')
+  // 系统语言在运行中变化时，只有「跟随系统」需要重新解析
+  if (typeof window !== 'undefined') {
+    window.addEventListener('languagechange', () => {
+      if (langSelection() === AUTO_LANG) setLang(AUTO_LANG)
+    })
+  }
   emit()
 }
 
@@ -243,7 +280,7 @@ export async function removeLang(id: string): Promise<boolean> {
     }
   }
   installed = installed.filter((p) => p.id !== id)
-  if (current.id === id) setLang('zh-CN')
+  if (current.id === id) setLang(AUTO_LANG)
   emit()
   return true
 }
@@ -275,19 +312,24 @@ export async function openLangFolder(): Promise<boolean> {
 try {
   builtin = [
     parseLang(zhCN, 'zh-CN.lang'),
+    parseLang(zhTW, 'zh-TW.lang'),
     parseLang(enUS, 'en-US.lang'),
+    parseLang(jaJP, 'ja-JP.lang'),
+    parseLang(koKR, 'ko-KR.lang'),
+    parseLang(ruRU, 'ru-RU.lang'),
   ]
 } catch (e) {
   // 内置包坏了也不能让整个界面起不来
   console.error('[i18n] failed to parse built-in language packs', e)
   builtin = [parseLang('{"id":"zh-CN","name":"简体中文","messages":{}}', 'zh-CN.lang')]
 }
-// 先按上次保存的语言显示，已安装的语言包由 initI18n() 补上
+// 先按上次保存的语言显示（没选过 = 跟随系统），已安装的语言包由 initI18n() 补上
 try {
   const saved = localStorage.getItem(LS_LANG)
-  if (saved) current = builtin.find((p) => p.id === saved) || current
+  const id = !saved || saved === AUTO_LANG ? pickSystemLang(systemLangTags()) : saved
+  current = builtin.find((p) => p.id === id) || current
 } catch {
-  /* ignore */
+  current = builtin.find((p) => p.id === pickSystemLang(systemLangTags())) || current
 }
 
 // 调试/自动化入口：CDP 测试和语言包作者可以用它快速切换、检查覆盖率
@@ -296,6 +338,10 @@ if (typeof window !== 'undefined') {
     setLang,
     listLangs,
     currentLang,
+    langSelection,
+    matchLangTag,
+    pickSystemLang,
+    AUTO_LANG,
     installLangText,
     removeLang,
     t,

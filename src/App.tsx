@@ -10,6 +10,7 @@ import BottomPanel from './components/BottomPanel'
 import StatusBar from './components/StatusBar'
 import OsuDifficultyPicker from './components/OsuDifficultyPicker'
 import SoundImportDialog from './components/SoundImportDialog'
+import KeysoundImportDialog from './components/KeysoundImportDialog'
 import { reloadActiveAudio, saveActive } from './core/actions'
 import { startAutoLoadWatch } from './core/autoLoadWatch'
 import AppSettingsDialog from './components/AppSettingsDialog'
@@ -272,6 +273,7 @@ export default function App() {
       <StatusBar />
       <OsuDifficultyPicker />
       <SoundImportDialog />
+      <KeysoundImportDialog />
       <AppSettingsDialog />
       <AddSoundDialog />
       <ChartPicker />

@@ -36,6 +36,7 @@ import { desktopApi } from '../core/desktop'
 import { getSongsFolder, setSongsFolder } from '../core/osuMapsets'
 import { getSoundFolder, setSoundFolder } from '../core/soundLibrary'
 import { getDisplayPrefs, setDisplayPrefs, type VolumeDisplay } from '../core/displayPrefs'
+import { reloadSettingsFile, saveSettingsFile, settingsFilePath } from '../core/settingsFile'
 import { isValidOrder, loadExportPrefs, orderToText, saveExportPrefs, textToOrder } from '../core/exportPrefs'
 import {
   CHART_BOOL_KEYS,
@@ -51,9 +52,11 @@ import { DEFAULT_SLOT_ORDER } from '../core/osuExport'
 import { useStore } from '../store'
 import { t } from '../i18n'
 import {
+  AUTO_LANG,
   currentLang,
   installLangText,
   isBuiltinLang,
+  langSelection,
   listLangs,
   openLangFolder,
   pickLangFile,
@@ -133,6 +136,8 @@ export default function AppSettingsDialog() {
   const [soundFolder, setSoundDir] = useState('')
   const [langMsg, setLangMsg] = useState('')
   const [songsHint, setSongsHint] = useState('')
+  const [cfgPath, setCfgPath] = useState('')
+  const [cfgMsg, setCfgMsg] = useState('')
   const [orderText, setOrderText] = useState('')
   const [cleanOld, setCleanOld] = useState(false)
   const [chartDef, setChartDef] = useState<ChartDefaults>(DEFAULT_CHART_DEFAULTS)
@@ -146,9 +151,8 @@ export default function AppSettingsDialog() {
     }
   }, [])
 
-  const isOpen = opened
-  useEffect(() => {
-    if (!isOpen) return
+  /** 从各个偏好模块读一遍，填满这一页的输入框（打开窗口 / 重新读取 cfg 都用） */
+  const loadAll = () => {
     setPrefs(loadComboPrefs())
     setColors(loadComboColors())
     setInheritMs(loadTimingPrefs().inheritMs)
@@ -162,26 +166,40 @@ export default function AppSettingsDialog() {
     const cd = loadChartDefaults()
     setChartDef(cd)
     setIndexText(formatIndexList(cd.PreferredIndex))
+  }
+
+  const isOpen = opened
+  useEffect(() => {
+    if (!isOpen) return
+    loadAll()
+    setCfgMsg('')
     box.current?.focus()
     void getSongsFolder().then((p) => {
       setSongs(p)
       setSongsHint(p ? '' : '没能自动探测到 osu!，请手动选择 Songs 文件夹')
     })
     void getSoundFolder().then(setSoundDir)
+    void settingsFilePath().then(setCfgPath)
   }, [isOpen])
 
   if (!isOpen) return null
 
   const bad: string[] = []
-  if (!(Number(inheritMs) > 0)) bad.push('继承阈值必须是正数（毫秒）')
+  if (!(Number(inheritMs) > 0)) bad.push(t('继承阈值必须是正数（毫秒）'))
   for (const k of COMBO_KEYS) {
     const list = invalidTokens(prefs[k] || '')
-    if (list.length) bad.push(`${k} 里的 ${list.join(', ')} 不是合法代号（只能用英文字母，大小写不限；或用 = 表示白板）`)
+    if (list.length)
+      bad.push(
+        t('{key} 里的 {list} 不是合法代号（只能用英文字母，大小写不限；或用 = 表示白板）', {
+          key: k,
+          list: list.join(', '),
+        }),
+      )
   }
   const order = textToOrder(orderText)
-  if (!isValidOrder(order)) bad.push('导出槽位顺序要正好 9 个、互不重复（如 sw, sf, sc, nw, nf, nc, dw, df, dc）')
+  if (!isValidOrder(order)) bad.push(t('导出槽位顺序要正好 9 个、互不重复（如 sw, sf, sc, nw, nf, nc, dw, df, dc）'))
   const prefIndex = parseIndexList(indexText)
-  if (!prefIndex) bad.push('PreferredIndex 只能填数字，用逗号分隔（如 11, 45, 14；留空 = 从 1 开始）')
+  if (!prefIndex) bad.push(t('PreferredIndex 只能填数字，用逗号分隔（如 11, 45, 14；留空 = 从 1 开始）'))
 
   const tabBad: Record<TabId, boolean> = {
     general: false,
@@ -200,7 +218,7 @@ export default function AppSettingsDialog() {
     setTab(id)
   }
 
-  const save = () => {
+  const save = async () => {
     if (bad.length) return
     const clean: ComboPrefs = {}
     for (const k of COMBO_KEYS) {
@@ -215,26 +233,46 @@ export default function AppSettingsDialog() {
     setDisplayPrefs({ colorAlphaByVol: alphaByVol, volumeDisplay: volMode, showOsuObjects })
     // 这两项影响画法/排版，让已经挂着的视图立刻按新偏好重画一次
     useStore.getState().bumpUi()
-    void setSongsFolder(songsFolder.trim())
-    void setSoundFolder(soundFolder.trim())
+    await setSongsFolder(songsFolder.trim())
+    await setSoundFolder(soundFolder.trim())
+    // 把这一整页的设置同步成文本文件（settings.cfg）
+    const w = await saveSettingsFile()
+    if (!w.ok) console.warn('[settings.cfg] 写入失败', w.error)
     closeAppSettings()
   }
 
   const browseSounds = async () => {
     const api = desktopApi()
     if (!api) return
-    const r = await api.openFolder({ title: '选择音效文件夹', defaultPath: soundFolder || undefined })
+    const r = await api.openFolder({ title: t('选择音效文件夹'), defaultPath: soundFolder || undefined })
     if (!r.canceled && r.dir) setSoundDir(r.dir)
+  }
+
+  const openCfgDir = async () => {
+    const api = desktopApi()
+    if (!api?.openSettingsDir) return
+    await api.openSettingsDir()
+  }
+
+  /** 手改完 settings.cfg 不用重启：重新读一遍，顺便把这一页的输入框刷新 */
+  const reloadCfg = async () => {
+    const r = await reloadSettingsFile()
+    loadAll()
+    setCfgMsg(
+      r.errors.length
+        ? `⚠ ${r.errors[0]}`
+        : t('已重新读取 settings.cfg（{n} 项生效）', { n: r.applied.length }),
+    )
   }
 
   const browseSongs = async () => {
     const api = desktopApi()
     if (!api) {
-      setSongsHint('浏览器模式无法选择本地目录')
+      setSongsHint(t('浏览器模式无法选择本地目录'))
       return
     }
     const res = await api.openFolder({
-      title: '选择 osu! Songs 文件夹',
+      title: t('选择 osu! Songs 文件夹'),
       defaultPath: songsFolder || undefined,
     })
     if (res.canceled || !res.dir) return
@@ -251,19 +289,19 @@ export default function AppSettingsDialog() {
     try {
       const f = await pickLangFile()
       if (!f) {
-        if (!desktopApi()) setLangMsg('浏览器模式请把 .lang 放到本地存储；桌面版可直接选择文件')
+        if (!desktopApi()) setLangMsg(t('浏览器模式请把 .lang 放到本地存储；桌面版可直接选择文件'))
         return
       }
       const pack = await installLangText(f.text)
       setLang(pack.id)
-      setLangMsg(`已安装 ${pack.name}（${pack.id}）`)
+      setLangMsg(t('已安装 {name}（{id}）', { name: pack.name, id: pack.id }))
     } catch (e) {
-      setLangMsg(`安装失败：${e instanceof Error ? e.message : String(e)}`)
+      setLangMsg(t('安装失败：{err}', { err: e instanceof Error ? e.message : String(e) }))
     }
   }
   const dropLang = async (p: LangPack) => {
     const ok = await removeLang(p.id)
-    setLangMsg(ok ? `已删除 ${p.name}` : '内置语言包不能删除')
+    setLangMsg(ok ? t('已删除 {name}', { name: p.name }) : t('内置语言包不能删除'))
   }
 
   return (
@@ -316,7 +354,7 @@ export default function AppSettingsDialog() {
                 </div>
                 <div className="hint">
                   {t('左栏第 5 个图标（谱面库）读取这个目录。留空会自动探测（注册表 → osu! 配置 → 常见安装位置）。')}
-                  {songsHint ? <span style={{ color: 'var(--warn)' }}> ⚠ {songsHint}</span> : ''}
+                  {songsHint ? <span style={{ color: 'var(--warn)' }}> ⚠ {t(songsHint)}</span> : ''}
                 </div>
               </div>
 
@@ -340,6 +378,28 @@ export default function AppSettingsDialog() {
                   {t('左栏第 6 个图标（音效库）扫描这个目录下的 .wav / .ogg，可以逐个试听并添加到当前谱面的 [Define]。')}
                 </div>
               </div>
+
+              <div className="set-section">
+                <div className="set-section-title">{t('配置文件')}</div>
+                <div className="row" style={{ marginBottom: 4 }}>
+                  <label style={{ width: 116 }}>settings.cfg</label>
+                  <div className="val mono" style={{ flex: 1, minWidth: 0, wordBreak: 'break-all', fontSize: 11 }}>
+                    {cfgPath || '…'}
+                  </div>
+                  <button className="btn small" onClick={() => void openCfgDir()} disabled={!desktopApi()}>
+                    {t('打开目录')}
+                  </button>
+                  <button className="btn small" onClick={() => void reloadCfg()}>
+                    {t('重新读取')}
+                  </button>
+                </div>
+                <div className="hint">
+                  {t('这一页的设置会整份写成文本（settings.cfg），方便备份、换机器或手改。')}
+                  <br />
+                  {t('手改之后要重启应用才生效；写错的项会被跳过，其余照常读取。')}
+                  {cfgMsg ? <div style={{ color: cfgMsg.startsWith('⚠') ? 'var(--warn)' : undefined }}>{cfgMsg}</div> : null}
+                </div>
+              </div>
             </>
           ) : null}
 
@@ -349,7 +409,7 @@ export default function AppSettingsDialog() {
                 {/* 这个类名会把标题转大写，所以标题只写中文 */}
                 <div className="set-section-title">{t('新谱面的默认值')}</div>
                 <div className="hint" style={{ marginBottom: 8 }}>
-                  {t('这些值会写进')}<b>{t('新建')}</b>{t('和')}<b>{t('从 .osu 导入')}</b>{t('的谱面；已经存在的谱面不受影响，要改某一份谱直接在文本里改它的 [Settings]。')}
+                  {t('这些值会写进新建和从 .osu 导入的谱面；已经存在的谱面不受影响，要改某一份谱直接在文本里改它的 [Settings]。')}
                 </div>
                 {CHART_BOOL_KEYS.map((k) => (
                   <label className="set-check" key={k}>
@@ -389,7 +449,8 @@ export default function AppSettingsDialog() {
                   </button>
                 </div>
                 <div className="hint">
-                  {t('导出 .osu 时音效组编号的分配顺序：')} <span className="mono">11, 45, 14</span> {t('表示先用 11、45、14，再补 1、2、3…；留空 = 从 1 开始。写进谱面时是')}
+                  {t('导出 .osu 时音效组编号的分配顺序：')} <span className="mono">11, 45, 14</span>{' '}
+                  {t('表示先用 11、45、14，再补 1、2、3…；留空 = 从 1 开始。写进谱面时是')}{' '}
                   <span className="mono">{formatIndexList(prefIndex || [])}</span>{t('。')}
                 </div>
               </div>
@@ -399,8 +460,8 @@ export default function AppSettingsDialog() {
           {tab === 'import' ? (
             <>
               <div className="si-tip">
-                {t('每个格子按')}<b>{t('优先级')}</b>{t('填，逗号分隔：')} <span className="mono">Ka, Kb, Kc</span>{' '}
-                {t('表示第一条用 Ka、第二条用 Kb、第三条用 Kc（同一组合因为编号/音色不同可能有多个）。填')} <span className="mono">=</span> {t('表示这一条默认当')}<b>{t('白板')}</b>{t('。留空则自动 Aa、Ab…')}
+                {t('每个格子按优先级填，逗号分隔：')} <span className="mono">Ka, Kb, Kc</span>{' '}
+                {t('表示第一条用 Ka、第二条用 Kb、第三条用 Kc（同一组合因为编号/音色不同可能有多个）。填 = 表示这一条默认当白板。留空则自动 Aa、Ab…')}
               </div>
 
               <div className="set-grid">
@@ -430,7 +491,7 @@ export default function AppSettingsDialog() {
                           <label
                             className="set-color"
                             style={{ ['--cc' as string]: c }}
-                            title={`这个槽位默认代号的颜色：${c}（导入时写进 [Define]）`}
+                            title={t('这个槽位默认代号的颜色：{c}（导入时写进 [Define]）', { c })}
                           >
                             <input type="color" value={c} onChange={(e) => setColor(k, e.target.value)} />
                           </label>
@@ -444,8 +505,9 @@ export default function AppSettingsDialog() {
               <div className="set-section">
                 <div className="row" style={{ marginBottom: 4 }}>
                   <span className="hint" style={{ flex: 1 }}>
-                    颜色写进 [Define] 的第五段（<span className="mono">hitsound soft-hitclap Aa = &quot;x.wav&quot; #4cc2ff</span>
-                    ），时间轴和格子按它上色；同一槽位里的第二个代号会自动做深浅变化。
+                    {t('颜色写进 [Define] 的第五段（')}
+                    <span className="mono">hitsound soft-hitclap Aa = &quot;x.wav&quot; #4cc2ff</span>
+                    {t('），时间轴和格子按它上色；同一槽位里的第二个代号会自动做深浅变化。')}
                   </span>
                   <button
                     className="btn small"
@@ -458,7 +520,7 @@ export default function AppSettingsDialog() {
                     {t('恢复默认')}
                   </button>
                 </div>
-                <div className="hint">不填代号、让它自动生成时，也同样用这里的颜色。</div>
+                <div className="hint">{t('不填代号、让它自动生成时，也同样用这里的颜色。')}</div>
               </div>
             </>
           ) : null}
@@ -481,8 +543,7 @@ export default function AppSettingsDialog() {
                   <span className="hint">ms</span>
                 </div>
                 <div className="hint">
-                  一条红线到下一次 BPM 变更超过这个时长 → 在这条红线处开新小节（不继承拍数）；
-                  短于此值的段（弱起、过渡）才接着上一小节数拍。默认 4000ms。
+                  {t('一条红线到下一次 BPM 变更超过这个时长 → 在这条红线处开新小节（不继承拍数）；短于此值的段（弱起、过渡）才接着上一小节数拍。默认 4000ms。')}
                 </div>
               </div>
 
@@ -501,8 +562,8 @@ export default function AppSettingsDialog() {
                   <span>{t('显示 [Files] ImportOsu 的物件时间轴')}</span>
                 </label>
                 <div className="hint" style={{ margin: '0 0 8px' }}>
-                  开启后，网格每行格子下方多一条物件轨道（circle / slider / spinner），行距相应加高 22px；
-                  没写 <span className="mono">ImportOsu</span> 时不占地方。关掉只隐藏轨道、不改格子高度。
+                  {t('开启后，网格每行格子下方多一条物件轨道（circle / slider / spinner），行距相应加高 22px；没写')}{' '}
+                  <span className="mono">ImportOsu</span> {t('时不占地方。关掉只隐藏轨道、不改格子高度。')}
                 </div>
                 <div className="row" style={{ margin: '2px 0 6px' }}>
                   <label style={{ width: 96 }}>{t('格子里音量')}</label>
@@ -521,20 +582,25 @@ export default function AppSettingsDialog() {
                   </div>
                 </div>
                 <div className="hint">
-                  只标在正文里真的写了 <span className="mono">&lt;v=58&gt;</span> 的位置（包括空格子）。
+                  {t('只标在正文里真的写了')}{' '}
+                  <span className="mono">&lt;v=58&gt;</span> {t('的位置（包括空格子）。')}
                   <br />
-                  <b>显示数字</b>：左边缝隙显示 <span className="mono">58</span>，2~3 位数字要占地方，间距加宽到 18px。
+                  <b>{t('显示数字')}</b>{t('：左边缝隙显示')} <span className="mono">58</span>
+                  {t('，2~3 位数字要占地方，间距加宽到 18px。')}
                   <br />
-                  <b>显示音量条</b>：同一位置画一根小竖条，下面浅绿 = 当前音量、上面深绿 = 还差的
-                  （<span className="mono">&lt;v=70&gt;</span> 就是下 70% 浅绿 + 上 30% 深绿），间距保持 4px。
+                  <b>{t('显示音量条')}</b>{t('：同一位置画一根小竖条，下面浅绿 = 当前音量、上面深绿 = 还差的')}
+                  {' ('}
+                  <span className="mono">&lt;v=70&gt;</span>{' '}
+                  {t('就是下 70% 浅绿 + 上 30% 深绿），间距保持 4px。')}
                   <br />
-                  <b>不显示</b>：什么都不画。
+                  <b>{t('不显示')}</b>{t('：什么都不画。')}
                 </div>
                 <div className="hint" style={{ marginTop: 6 }}>
-                  勾上：音量 100 → <span className="mono">FF</span>、音量 0 → <span className="mono">37</span>
-                  （55/255），中间线性；取消则一律不透明。没写颜色的默认色同样适用。
-                  [Define] 里可以给每条音效配色：<span className="mono">hitsound custom Aa = &quot;x.wav&quot; red</span>
-                  {' '}或 <span className="mono">#FF0000</span>。
+                  {t('勾上：音量 100 →')} <span className="mono">FF</span>
+                  {t('、音量 0 →')} <span className="mono">37</span>
+                  {t('（55/255），中间线性；取消则一律不透明。没写颜色的默认色同样适用。[Define] 里可以给每条音效配色：')}{' '}
+                  <span className="mono">hitsound custom Aa = &quot;x.wav&quot; red</span> {t('或')}{' '}
+                  <span className="mono">#FF0000</span>.
                 </div>
               </div>
             </>
@@ -555,22 +621,23 @@ export default function AppSettingsDialog() {
                   onBlur={() => setOrderText(orderToText(textToOrder(orderText)))}
                 />
                 <button className="btn small" onClick={() => setOrderText(orderToText(DEFAULT_SLOT_ORDER))}>
-                  恢复默认
+                  {t('恢复默认')}
                 </button>
               </div>
               <div className="hint">
-                导出 .osu 时，代号只写了 <span className="mono">hitwhistle</span> /
-                <span className="mono">hitclap</span> / <span className="mono">custom</span>（没定 s/n/d）就按这个顺序挑槽位。
-                缩写：s/n/d = soft/normal/drum，w/f/c = whistle/finish/clap；也可以直接写
-                <span className="mono">soft-hitwhistle</span>。
+                {t('导出 .osu 时，代号只写了')} <span className="mono">hitwhistle</span> /{' '}
+                <span className="mono">hitclap</span> / <span className="mono">custom</span>{' '}
+                {t('（没定 s/n/d）就按这个顺序挑槽位。缩写：s/n/d = soft/normal/drum，w/f/c = whistle/finish/clap；也可以直接写')}{' '}
+                <span className="mono">soft-hitwhistle</span>.
               </div>
               <label className="set-check">
                 <input type="checkbox" checked={cleanOld} onChange={(e) => setCleanOld(e.target.checked)} />
                 <span>{t('导出前删掉本谱之前生成的 [EZHS]、[EZHS1]… .osu')}</span>
               </label>
               <div className="hint">
-                只删文件名匹配 <span className="mono">&lt;artist&gt; - &lt;title&gt; (&lt;creator&gt;) [[EZHS*]].osu</span>{' '}
-                的文件，别的谱和音效文件不动；如果这次导出因为音效同名冲突被拦下，旧文件也不会先被删。
+                {t('只删文件名匹配')}{' '}
+                <span className="mono">&lt;artist&gt; - &lt;title&gt; (&lt;creator&gt;) [[EZHS*]].osu</span>{' '}
+                {t('的文件，别的谱和音效文件不动；如果这次导出因为音效同名冲突被拦下，旧文件也不会先被删。')}
               </div>
             </div>
           ) : null}
@@ -583,9 +650,10 @@ export default function AppSettingsDialog() {
                   <label style={{ width: 116 }}>{t('语言')}</label>
                   <select
                     style={{ flex: 1, minWidth: 0 }}
-                    value={curLang.id}
+                    value={langSelection()}
                     onChange={(e) => setLang(e.target.value)}
                   >
+                    <option value={AUTO_LANG}>{t('跟随系统（自动）')}</option>
                     {langs.map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.name} ({p.id})
@@ -600,8 +668,15 @@ export default function AppSettingsDialog() {
                   </button>
                 </div>
                 <div className="hint">
-                  {t('切换后立即生效。内置简体中文 / English；其他语言可以安装')} <span className="mono">.lang</span> {t('语言包，放进语言文件夹或直接选文件都行（第三方语言包只影响界面文本，原生菜单只有中/英）。')}
+                  {t('切换后立即生效。内置简体中文 / 繁體中文 / English / 日本語 / 한국어 / Русский；其他语言可以安装')}{' '}
+                  <span className="mono">.lang</span>{' '}
+                  {t('语言包，放进语言文件夹或直接选文件都行（第三方语言包只影响界面文本，原生菜单只有中/英）。')}
                 </div>
+                {langSelection() === AUTO_LANG ? (
+                  <div className="hint">
+                    {t('当前使用：{name}', { name: curLang.name })}
+                  </div>
+                ) : null}
                 {langMsg ? <div className="hint">{langMsg}</div> : null}
               </div>
 

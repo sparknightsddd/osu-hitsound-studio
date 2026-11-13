@@ -5,20 +5,23 @@
  */
 import { useStore, setActiveHook } from '../store'
 import { engine } from '../audio/engine'
-import { desktopApi, pickChartFiles, pickOsuFiles } from './desktop'
+import { desktopApi, materializeFile, pickChartFiles, pickOsuFiles } from './desktop'
 import { basename, dirname, parseChart, resolvePath } from './parse'
 import { joinDir, planSoundBundle, samePath } from './bundle'
 import { findDuplicateSound } from './dupSound'
 import {
   download,
   fromOsu,
+  slotLabel,
   toSampleMapJson,
   toSampleMapText,
   toTimelineCsv,
 } from './exporter'
 import { DEMO, TEMPLATE } from '../samples/demo'
 import { applyChartSettingsToText } from './chartDefaults'
-import { osuFileName, planOsuExport } from './osuExport'
+import { osuFileName, planOsuExport, setExportTranslator } from './osuExport'
+import { collectOsuSampleIndices, parseOsuTargetTimeline, patchOsuText } from './osuPatch'
+import { planSubSlots } from './subSlotPlan'
 import { fmtOsuTime } from './time'
 import { loadExportPrefs } from './exportPrefs'
 import { blankHitsoundHs, desktopOsuEnv, renderOsuSoundsHs } from './osuToHs'
@@ -35,18 +38,22 @@ import {
 import { pickOsuDifficulty } from '../components/OsuDifficultyPicker'
 import { pickChart } from '../components/ChartPicker'
 import { matchHitsounds, matchKeysounds, matchSong, type PickedEntry } from './fileMatch'
-import { singleKeyName } from './keysound'
+import { loadKeysoundLibrary, type LibraryReader } from '../audio/keysoundLibrary'
 import { parseColorToken } from './colors'
 import { osuFileProblem, type OsuFileProblem } from './osuFile'
 import { editHitsoundDefineText } from './defineEdit'
 import { slotFromFileName } from './soundSlots'
 import { isCodeName } from './codes'
 import { t } from '../i18n'
-import type { ChartDoc } from './types'
+import type { ChartDoc, SubSlot } from './types'
 
 function log(msg: string) {
   useStore.getState().log(msg)
 }
+
+// osuExport 是纯计算模块，不能直接 import i18n；在这里把 t() 注进去，
+// 导出/写入时的槽位错误与提示就会跟界面语言一起切换。
+setExportTranslator(t)
 
 /** 磁盘上一个音频条目的描述（主进程扫描出来的） */
 export interface DiskAudioEntry {
@@ -164,21 +171,55 @@ export async function autoLoadAssets(
       /* 同上 */
     }
   }
+  const apiBin = async (p: string): Promise<ArrayBuffer | null> => {
+    const api = desktopApi()
+    if (!api) return null
+    const r = await api.readBinary(p)
+    if (!r.ok || !r.data) return null
+    const d = r.data
+    return d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength) as ArrayBuffer
+  }
   for (const l of libs) {
     if (!l.file) {
       rep.libNotes.push(`乐器 ${l.instrument} ✗ 没找到 "${l.relPath}"`)
       continue
     }
-    if (l.target.soundFont) {
-      rep.libNotes.push(`乐器 ${l.instrument} ✓ 找到音色库 ${l.file.name}（暂用内置合成音试听）`)
-    } else {
-      try {
-        await engine.bindSample(singleKeyName(l.instrument), l.file, false)
-        rep.libNotes.push(`乐器 ${l.instrument} ✓ ${l.file.name}`)
-      } catch {
-        rep.libNotes.push(`乐器 ${l.instrument} ✗ 解码失败：${l.file.name}`)
-      }
+    const path = l.target.resolvedPath || ''
+    if (!path) {
+      rep.libNotes.push(`乐器 ${l.instrument} ✗ 音色库路径为空`)
+      continue
     }
+    const dir = dirname(path)
+    const joinRel = (rel: string) => {
+      const r = rel.replace(/\\/g, '/')
+      if (/^[a-z]:\//i.test(r) || r.startsWith('//') || r.startsWith('/')) return r
+      const d = dir.replace(/\\/g, '/').replace(/\/+$/, '')
+      return d ? `${d}/${r}` : r
+    }
+    const findEntry = (rel: string) => {
+      const p = rel.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase()
+      const base = p.split('/').pop() || p
+      return (
+        entries.find((e) => e.path === p) ||
+        entries.find((e) => e.path.endsWith('/' + p)) ||
+        entries.find((e) => e.name.toLowerCase() === base) ||
+        null
+      )
+    }
+    const readAny = async (p: string): Promise<ArrayBuffer | null> => {
+      const direct = await apiBin(p)
+      if (direct) return direct
+      const hit = findEntry(p)
+      if (!hit) return null
+      return (await materializeFile(hit.file)).arrayBuffer()
+    }
+    const reader: LibraryReader = {
+      readMain: async () => (await apiBin(path)) || (l.file ? (await materializeFile(l.file)).arrayBuffer() : null),
+      resolve: joinRel,
+      readPath: readAny,
+    }
+    const res = await loadKeysoundLibrary(l.instrument, l.target, reader)
+    rep.libNotes.push(res.note)
   }
 
   useStore.getState().setBindings(bindings)
@@ -811,7 +852,7 @@ function existingDefsOf(doc: ChartDoc): Record<string, ExistingDef> {
   const existing: Record<string, ExistingDef> = {}
   for (const h of doc.hitsounds) {
     if (!h.name) continue
-    const slotText = h.alts.map((a) => a.raw).join('|') || 'custom'
+    const slotText = slotLabel(h)
     existing[h.name] = {
       slots: h.alts.filter((a) => !a.custom && a.sampleSet && a.hitType).map((a) => `${a.sampleSet}-${a.hitType}`),
       color: h.color,
@@ -860,12 +901,15 @@ export async function addSoundFileDialog(file: { name: string; path: string }): 
     initial: guess ? { slots: [guess] } : undefined,
   })
   if (!plan) return false
+  // 替换已有代号时保留它的副槽位（弹窗只编辑主槽位）
+  const oldDef = doc.hitsounds.find((h) => h.name === plan.name)
   return addHitsoundDefine({
     fileName: file.name,
     filePath: file.path,
     slots: plan.slots,
     name: plan.name,
     color: plan.color,
+    subSlots: oldDef?.subSlots,
   })
 }
 
@@ -886,7 +930,10 @@ function writeDefineLine(line: string, nm: string): { ok: boolean; replacing: bo
     log(`✗ 代号 "${nm}" 不符合命名规则（只能用英文字母，大小写不限）`)
     return { ok: false, replacing: false }
   }
-  const replacing = s.doc.hitsounds.find((h) => h.name === nm)
+  // 用当前正文重新解析：store 里的 doc 有 180ms 防抖，刚编辑过代码时位置/路径
+  // 可能还是旧的，直接按旧位置替换会切到别的定义行（表现就是“样本路径被改了”）。
+  const doc = parseChart(f.content, { baseDir: f.path ? dirname(f.path) : undefined })
+  const replacing = doc.hitsounds.find((h) => h.name === nm)
 
   if (replacing) {
     s.updateContent(f.id, f.content.slice(0, replacing.from) + line + f.content.slice(replacing.to))
@@ -932,12 +979,21 @@ export async function addHitsoundDefine(opts: {
   name: string
   /** 可选颜色（#RRGGBB / 英文名 / 已归一化的 hex），不填就写在默认色上 */
   color?: string
+  /** 复制已有音效时一并带过去的副槽位 */
+  subSlots?: SubSlot[]
 }): Promise<boolean> {
   const s = useStore.getState()
   const nm = opts.name.trim()
+  const active = s.files.find((x) => x.id === s.activeId)
+  if (!active) {
+    log('✗ 没有打开的谱面，先新建或导入一份再加音效')
+    return false
+  }
+  // 同上：刚编辑过 [Files] path / [Define] 时，store 里的 doc 可能还没跟上
+  const freshDoc = parseChart(active.content, { baseDir: active.path ? dirname(active.path) : undefined })
 
   // 路径：在 [Files] path 目录树里就写相对路径，否则写绝对路径
-  const root = String(s.doc.settings.Path || s.doc.baseDir || '')
+  const root = String(freshDoc.settings.Path || freshDoc.baseDir || '')
     .replace(/^["']|["']$/g, '')
     .replace(/\\/g, '/')
     .replace(/\/+$/, '')
@@ -945,10 +1001,24 @@ export async function addHitsoundDefine(opts: {
   let value = abs
   if (root && abs.toLowerCase().startsWith(root.toLowerCase() + '/')) value = abs.slice(root.length + 1)
 
-  const slot = opts.slots.length ? opts.slots.join('|') : 'custom'
+  const mainSlot = opts.slots.length ? opts.slots.join('|') : 'custom'
+  const subs = (opts.subSlots || []).filter((x, i, arr) => arr.indexOf(x) === i)
+  const slot = subs.length ? `${mainSlot}|${subs.join('|')}` : mainSlot
   // 颜色是可选的第五段：`... = "x.wav" #FF0000`；认不出来就当没填（默认色）
   const color = opts.color ? parseColorToken(opts.color) : null
-  const line = `hitsound ${slot} ${nm} = "${value}"${color ? ` ${color.toUpperCase()}` : ''}`
+  /**
+   * 同一个代号再次选到**同一个文件**时，保留用户原来的写法：
+   * 原来写的是 `sub/foo.ogg` 就还写相对路径，原来写绝对路径也照旧。
+   * 否则每次“换文件”都会把相对/绝对、斜杠风格来回改一遍。
+   */
+  const old = freshDoc.hitsounds.find((h) => h.name === nm && h.kind === 'hitsound')
+  const sameFile =
+    !!old &&
+    !!old.resolvedPath &&
+    old.resolvedPath.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() ===
+      abs.replace(/\/+$/, '').toLowerCase()
+  const valueText = sameFile ? old!.value : `"${value}"`
+  const line = `hitsound ${slot} ${nm} = ${valueText}${color ? ` ${color.toUpperCase()}` : ''}`
 
   const w = writeDefineLine(line, nm)
   if (!w.ok) return false
@@ -968,7 +1038,11 @@ export async function addHitsoundDefine(opts: {
   }
 
   log(
-    `${w.replacing ? '已替换音效' : '已添加音效'}：${line}${value !== abs ? '（相对 [Files] path）' : ''}`,
+    `${w.replacing ? '已替换音效' : '已添加音效'}：${line}${
+      (sameFile ? !/^["']?(?:[A-Za-z]:[\\/]|[\\/])/.test(old!.value) : value !== abs)
+        ? '（相对 [Files] path）'
+        : ''
+    }`,
   )
   return true
 }
@@ -985,9 +1059,12 @@ export async function addBuiltinSoundDefine(opts: {
   slots: string[]
   name: string
   color?: string
+  subSlots?: SubSlot[]
 }): Promise<boolean> {
   const nm = opts.name.trim()
-  const slot = opts.slots.length ? opts.slots.join('|') : 'custom'
+  const mainSlot = opts.slots.length ? opts.slots.join('|') : 'custom'
+  const subs = (opts.subSlots || []).filter((x, i, arr) => arr.indexOf(x) === i)
+  const slot = subs.length ? `${mainSlot}|${subs.join('|')}` : mainSlot
   const color = opts.color ? parseColorToken(opts.color) : null
   const line = `hitsound ${slot} ${nm} = default.${opts.ref}${color ? ` ${color.toUpperCase()}` : ''}`
 
@@ -1066,7 +1143,14 @@ export async function addBuiltinSoundDialog(ref: string): Promise<boolean> {
     initial: guess ? { slots: [guess] } : undefined,
   })
   if (!plan) return false
-  return addBuiltinSoundDefine({ ref, slots: plan.slots, name: plan.name, color: plan.color })
+  const oldDef = doc.hitsounds.find((h) => h.name === plan.name)
+  return addBuiltinSoundDefine({
+    ref,
+    slots: plan.slots,
+    name: plan.name,
+    color: plan.color,
+    subSlots: oldDef?.subSlots,
+  })
 }
 
 /**
@@ -1166,7 +1250,7 @@ export async function copySoundToOtherChart(code: string): Promise<boolean> {
   const existing: Record<string, ExistingDef> = {}
   for (const h of useStore.getState().doc.hitsounds) {
     if (!h.name) continue
-    const slotText = h.alts.map((a) => a.raw).join('|') || 'custom'
+    const slotText = slotLabel(h)
     existing[h.name] = {
       slots: h.alts.filter((a) => !a.custom && a.sampleSet && a.hitType).map((a) => `${a.sampleSet}-${a.hitType}`),
       color: h.color,
@@ -1193,6 +1277,7 @@ export async function copySoundToOtherChart(code: string): Promise<boolean> {
     slots: plan.slots,
     name: plan.name,
     color: plan.color,
+    subSlots: def.subSlots,
   })
 }
 
@@ -1252,10 +1337,17 @@ export async function exportOsuPackage() {
   const doc = useStore.getState().doc
   const plan = planOsuExport(doc, { slotOrder: loadExportPrefs().slotOrder })
   if (plan.errors.length) {
-    log(`✗ 有 ${plan.errors.length} 个音效槽位问题，先处理再导出：`)
+    log(t('✗ 有 {n} 个音效槽位问题，先处理再导出：', { n: plan.errors.length }))
     for (const e of plan.errors.slice(0, 8)) log('  ' + e)
-    if (plan.errors.length > 8) log(`  …还有 ${plan.errors.length - 8} 条`)
+    if (plan.errors.length > 8) log('  ' + t('…还有 {n} 条', { n: plan.errors.length - 8 }))
     return
+  }
+  if (plan.warnings.length) {
+    for (const w of plan.warnings.slice(0, 4)) log('⚠ ' + w)
+    if (plan.warnings.length > 4) log('  ' + t('…还有 {n} 条提示', { n: plan.warnings.length - 4 }))
+  }
+  if (doc.hitsounds.some((h) => h.subSlots?.length)) {
+    log('提示：副槽位（sliderside/slidertick/successor）只在「把音效写入现有 .osu」时生效；普通导出每个音效都会生成一个圆圈。')
   }
   const dir = String(doc.settings.Path || doc.baseDir || '').replace(/^["']|["']$/g, '').trim()
   if (!dir) {
@@ -1360,6 +1452,240 @@ export async function exportOsuPackage() {
   )
   for (const e of (r.errors || []).slice(0, 6)) log('  ⚠ ' + e)
 }
+/**
+ * 把当前音效谱直接写进一份现有的 .osu（替代 Mapping Tools 的 Hitsound Copier）。
+ *
+ * 默认目标是 [Files] ImportOsu 指向的原谱；没有就弹文件选择框。
+ * 匹配按物件节点的毫秒时间（滑条头 / 折返点 / 滑条尾 / 转盘尾），
+ * 音效文件按导出音效包同一套规则复制/混音到目标谱所在文件夹。
+ */
+export async function writeOsuHitsounds(): Promise<boolean> {
+  const api = desktopApi()
+  const doc = useStore.getState().doc
+  if (!api) {
+    log('✗ 浏览器模式不能直接写 .osu，请在桌面版里用这个功能')
+    return false
+  }
+
+  // 目标：优先用 [Files] ImportOsu，没有就让用户挑
+  let target = doc.importOsuPath || ''
+  if (!target) {
+    const picked = await api.openFiles({
+      title: '选择要写入音效的 .osu',
+      defaultPath: doc.baseDir || undefined,
+      filters: [{ name: 'osu! 谱面', extensions: ['osu'] }],
+      properties: ['openFile'],
+    })
+    if (picked.canceled || !picked.files.length) return false
+    target = picked.files[0].path
+  }
+  const targetName = basename(target)
+  const rd = await api.readText(target)
+  if (!rd.ok || !rd.text) {
+    log(`✗ 读取目标谱失败：${rd.error || target}`)
+    return false
+  }
+  if (!(await verifyOsuText(rd.text, targetName))) return false
+
+  // 目标谱已经占用的编号留出来，新音效组从后面排，避免盖掉它自己的音效
+  const reserved = collectOsuSampleIndices(rd.text)
+  const plan = planOsuExport(doc, {
+    slotOrder: loadExportPrefs().slotOrder,
+    reservedIndices: reserved,
+  })
+  // 「没有合法槽位」的叠音组合（w/f/c 来自不同采样组）在 osu 里无法表示：
+  // 可以确认后跳过它们，其余音效照常写入；其它错误（缺定义等）仍然直接拦下。
+  const skipped = plan.skippedCombos
+  const skippedTimes = skipped.reduce((n, c) => n + c.count, 0)
+  const noSlot = new Set(plan.noSlotErrors)
+  const fatal = plan.errors.filter((e) => !noSlot.has(e))
+  if (fatal.length) {
+    log(t('✗ 有 {n} 个音效槽位问题，先处理再写入：', { n: fatal.length }))
+    for (const e of fatal.slice(0, 8)) log('  ' + e)
+    return false
+  }
+  const hasGlobalSub = doc.hitsounds.some(
+    (h) => !h.name && h.subSlots?.some((x) => x === 'sliderside' || x === 'slidertick'),
+  )
+  if (!plan.samples.size && !hasGlobalSub) {
+    log('✗ 这份音效谱里没有音效，没什么可写入的')
+    return false
+  }
+  if (skipped.length) {
+    const btn0 = await api.messageBox({
+      type: 'warning',
+      buttons: ['仍然写入（跳过这些组合）', '取消'],
+      defaultId: 1,
+      cancelId: 1,
+      title: '部分音效无法写入',
+      message: `${skipped.length} 个叠音组合没有合法槽位，共 ${skippedTimes} 个时刻不会写入`,
+      detail:
+        skipped
+          .slice(0, 8)
+          .map((c) => `[${c.names.join(' ')}] × ${c.count}（最早 ${fmtOsuTime(c.time)}）`)
+          .join('\n') +
+        (skipped.length > 8 ? `\n…还有 ${skipped.length - 8} 个` : '') +
+        '\n\n这些组合里的 w/f/c 来自不同 soft/normal/drum 采样组，' +
+        'osu 的一个物件只能写一个采样组，无法同时表达。\n' +
+        '继续写入会跳过它们，其余音效正常写入。',
+    })
+    if (btn0 !== 0) {
+      log('已取消写入 .osu')
+      return false
+    }
+  }
+
+  /**
+   * 副槽位：主槽位落不到目标谱节点上的音效，按 slidertick > sliderside > successor
+   * 的固定优先级处理。结果会删掉对应的 samples，并补绿线/音效文件。
+   */
+  const targetTimeline = parseOsuTargetTimeline(rd.text)
+  const sub = planSubSlots(doc, plan.samples, targetTimeline, {
+    usedIndices: [...plan.groups.map((g) => g.index), ...reserved],
+  })
+  const samples = sub.samples
+  const exportFiles = [...plan.files, ...sub.files]
+
+  const allowEmpty = hasGlobalSub || sub.placements.length > 0
+  const basePatch = patchOsuText(rd.text, samples, { extraMoves: sub.moves, allowEmpty })
+  if (!basePatch.ok) {
+    log(`✗ 无法写入：${basePatch.error || '未知错误'}`)
+    return false
+  }
+  const st = basePatch.stats
+  const subCount = sub.placements.length
+  if (!st.matchedTimes && !subCount && !sub.globalCount) {
+    log(`✗ 目标谱里没有任何时间点和音效谱对上（共 ${st.eventTimes} 个时刻）`)
+    log('  检查一下 ImportOsu 是不是同一份谱，或者物件时间是否被改过')
+    return false
+  }
+
+  const tickCount = sub.placements.filter((p) => p.slot === 'slidertick').length
+  const sideCount = sub.placements.filter((p) => p.slot === 'sliderside').length
+  const succCount = sub.placements.filter((p) => p.slot === 'successor').length
+  const missing = st.missingCount
+    ? `${st.missingCount} 个（最早 ${fmtOsuTime(st.missingTimes[0])} 等）`
+    : '0 个'
+  const detail = [
+    `目标：${target}`,
+    `匹配：${st.matchedTimes}/${st.eventTimes} 个时刻 · ${st.objectsPatched} 个物件 / ${st.nodesPatched} 个节点（滑条边缘 ${st.edgeNodesPatched} 个）`,
+    ...(subCount
+      ? [`副槽位：${subCount} 个（滑条点 ${tickCount} / 滑条身 ${sideCount} / 后继 ${succCount}）`]
+      : []),
+    ...(sub.globalCount ? [`全局白板副槽位：${sub.globalCount} 个文件`] : []),
+    `未匹配：${missing}`,
+    `音效组 ${plan.groups.length} 个 · 需要复制/混音 ${exportFiles.length} 个文件${plan.mixCount ? `（${plan.mixCount} 个混音槽位）` : ''}`,
+    ...(skipped.length ? [`跳过：${skipped.length} 个无法表示的叠音组合（${skippedTimes} 个时刻）`] : []),
+    '',
+    '「另存为新难度」会在同目录生成一份带 [HS] 的 .osu，原文件不动；',
+    '「覆盖原文件」会先把原 .osu 备份成 .bak。',
+  ].join('\n')
+  const btn = await api.messageBox({
+    type: 'info',
+    buttons: ['另存为新难度…', '覆盖原文件（备份 .bak）', '取消'],
+    defaultId: 0,
+    cancelId: 2,
+    title: '把音效写入 .osu',
+    message: st.eventTimes + subCount
+      ? `${targetName}：${st.matchedTimes + subCount}/${st.eventTimes + subCount} 个时刻可写入`
+      : `${targetName}：写全局副槽位 ${sub.globalCount} 个文件`,
+    detail,
+  })
+  if (btn === 2 || btn < 0) {
+    log('已取消写入 .osu')
+    return false
+  }
+  const overwrite = btn === 1
+
+  let outPath = target
+  let version = ''
+  let backup = overwrite
+  if (!overwrite) {
+    const origVersion = /^Version:(.*)$/m.exec(rd.text)?.[1]?.trim() || ''
+    const defaultName = targetName.replace(/\.osu$/i, '') + ' [HS].osu'
+    const save = await api.saveFile({
+      title: '写入音效到 .osu',
+      name: defaultName,
+      defaultPath: joinDir(dirname(target), defaultName),
+      filters: [{ name: 'osu! 谱面', extensions: ['osu'] }],
+    })
+    if (save.canceled || !save.path) return false
+    outPath = save.path
+    version = basename(outPath).replace(/\.osu$/i, '') || `${origVersion} [HS]`
+    // 用户如果在保存框里直接选中了原文件，也得先备份
+    if (outPath.toLowerCase() === target.toLowerCase()) backup = true
+  }
+
+  const patch = patchOsuText(rd.text, samples, {
+    ...(overwrite ? {} : { version }),
+    extraMoves: sub.moves,
+    allowEmpty,
+  })
+  if (!patch.ok || !patch.text) {
+    log(`✗ 生成目标谱失败：${patch.error || '未知错误'}`)
+    return false
+  }
+
+  const dir = dirname(outPath)
+  if (!dir) {
+    log(`✗ 无法确定输出目录：${outPath}`)
+    return false
+  }
+  const r = await api.exportOsuPackage({
+    dir,
+    osuPath: outPath,
+    backup,
+    version,
+    text: patch.text,
+    files: exportFiles,
+    artist: doc.metadata.Artist || '',
+    title: doc.metadata.Title || '',
+    creator: doc.metadata.Creator || '',
+    cleanOld: false,
+  })
+  if (r.conflict) {
+    const list = r.conflicts || []
+    log(`✗ 目标目录里已有 ${list.length} 个同名但内容不同的音效文件，已取消：`)
+    for (const c of list.slice(0, 10)) log('  ' + c)
+    await api.messageBox({
+      type: 'warning',
+      buttons: ['知道了'],
+      title: '写入被阻止',
+      message: `目录里已有 ${list.length} 个同名但内容不同的音效文件`,
+      detail:
+        list.slice(0, 12).join('\n') +
+        '\n\n为避免盖掉现有的音效，这次一个文件都没有写。请把这些文件移出目录后重试。',
+    })
+    return false
+  }
+  if (!r.ok) {
+    log(`✗ 写入失败：${r.error || '未知错误'}`)
+    await api.messageBox({
+      type: 'error',
+      buttons: ['知道了'],
+      title: '写入失败',
+      message: r.error || '未知错误',
+    })
+    return false
+  }
+
+  const mixCount = exportFiles.filter((f) => f.mix).length
+  log(`✓ 已写入音效：${r.osuPath}`)
+  if (backup) log(`  原文件已备份：${target}.bak`)
+  log(
+    `  ${st.matchedTimes + subCount}/${st.eventTimes + subCount} 个时刻 · ${st.objectsPatched} 个物件 / ${st.nodesPatched} 个节点` +
+      (subCount ? ` · 副槽位 ${subCount} 个（滑条点 ${tickCount} / 滑条身 ${sideCount} / 后继 ${succCount}）` : '') +
+      ` · 新写 ${r.written ?? 0} 个音效文件 · 跳过 ${r.skipped ?? 0} 个` +
+      (mixCount ? ` · 混音 ${mixCount} 个` : ''),
+  )
+  if (st.missingCount) log(`  ⚠ 有 ${st.missingCount} 个时刻没找到目标物件（例如 ${fmtOsuTime(st.missingTimes[0])}）`)
+  if (skipped.length) {
+    log(`  ⚠ 跳过了 ${skipped.length} 个无法表示的叠音组合（${skippedTimes} 个时刻）：`)
+    for (const c of skipped.slice(0, 8)) log(`    [${c.names.join(' ')}] × ${c.count}`)
+  }
+  return true
+}
+
 export function exportCsv() {
   return exportText(baseName() + '.timeline.csv', toTimelineCsv(useStore.getState().doc), 'text/csv;charset=utf-8')
 }
@@ -1612,4 +1938,5 @@ if (typeof window !== 'undefined') {
   ;(window as any).__importOsuFile = importOsuFile
   ;(window as any).__bundleSounds = bundleSoundsToChartDir
   ;(window as any).__openChartDir = openChartDir
+  ;(window as any).__writeOsuHitsounds = writeOsuHitsounds
 }

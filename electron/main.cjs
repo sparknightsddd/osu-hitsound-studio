@@ -58,6 +58,16 @@ function createWindow() {
     },
   })
 
+  // Ctrl+, 打开设置（菜单项没有用 accelerator，见上面的说明）
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return
+    const mod = process.platform === 'darwin' ? input.meta : input.control
+    if (mod && !input.alt && !input.shift && (input.key === ',' || input.code === 'Comma')) {
+      event.preventDefault()
+      send('menu:settings')
+    }
+  })
+
   if (IS_DEV) {
     win.loadURL(DEV_URL)
   } else {
@@ -127,6 +137,7 @@ function buildMenu() {
         { label: M('打开 .hs 文件…', 'Open .hs file…'), accelerator: 'CmdOrCtrl+I', ...act('open') },
         { label: M('从 .osu 导入（另存为 .hs，原谱只读）', 'Import from .osu (save as .hs, read-only source)'), ...act('import') },
         { label: M('从 .osu 导入音效…', 'Import hitsounds from .osu…'), accelerator: 'CmdOrCtrl+Shift+I', ...act('importSounds') },
+        { label: M('导入 MIDI / musictxt 到 [Keysound]…', 'Import MIDI / musictxt into [Keysound]…'), ...act('importKeysound') },
         { label: M('打开示例谱面', 'Open sample chart'), ...act('demo') },
         { type: 'separator' },
         { label: M('保存', 'Save'), accelerator: 'CmdOrCtrl+S', ...act('save') },
@@ -136,6 +147,7 @@ function buildMenu() {
         { label: M('将所有音效复制到谱面文件夹内（改名为代号）', 'Copy all hitsounds into chart folder (rename to codes)'), ...act('bundleSounds') },
         { type: 'separator' },
         { label: M('导出音效包（写入 [Files] path）', 'Export hitsound package (into [Files] path)'), accelerator: 'CmdOrCtrl+E', ...act('exportOsuPackage') },
+        { label: M('把音效写入 .osu…（替代 Hitsound Copier）', 'Write hitsounds into .osu… (Hitsound Copier replacement)'), ...act('writeOsuHitsounds') },
         { label: M('另存为 .osu…（不复制音效）', 'Save as .osu… (no sound files)'), ...act('exportOsu') },
         { label: M('导出时间轴 CSV', 'Export timeline CSV'), ...act('exportCsv') },
         { label: M('导出音效映射 JSON', 'Export sound map JSON'), ...act('exportJson') },
@@ -159,7 +171,9 @@ function buildMenu() {
         { type: 'separator' },
         { label: M('重新解析谱面', 'Reparse chart'), accelerator: 'F5', ...act('reparse') },
         { type: 'separator' },
-        { label: M('设置…', 'Settings…'), accelerator: 'CmdOrCtrl+,', ...act('settings') },
+        // 快捷键写进标题、自己拦：Electron 的 accelerator 文案由系统生成，
+        // 中文 Windows 上会显示成「Ctrl+逗号」，没法随界面语言切换。
+        { label: `${M('设置…', 'Settings…')} (${process.platform === 'darwin' ? '⌘,' : 'Ctrl+,'})`, ...act('settings') },
       ],
     },
     {
@@ -262,7 +276,7 @@ ipcMain.handle('dialog:openFiles', async (_e, opts = {}) => {
   return { canceled: false, files }
 })
 
-const AUDIO_EXT = /\.(mp3|ogg|wav|flac|m4a|aac|opus|mp4|webm)$/i
+const AUDIO_EXT = /\.(mp3|ogg|wav|flac|m4a|aac|opus|mp4|webm|sf2|sf3|sfz)$/i
 
 /**
  * 从 .osu / .hs 文本里抠出音频文件名（osu! 叫 AudioFilename，本程序 [Files] 里叫 audio）。
@@ -428,8 +442,9 @@ ipcMain.handle('folder:loadCharts', async (_e, opts = {}) => {
     // 没有谱面引用，退而求其次：取第一个「像歌曲」的音频。
     // 递归收集后目录里可能混着一堆音色样本，优先挑顶层的常见音乐格式。
     const SONG_PREF = ['.mp3', '.ogg', '.flac', '.m4a', '.wav']
+    const SF_EXT = new Set(['.sf2', '.sf3', '.sfz'])
     const top = audios.filter((a) => !a.depth)
-    const pool = top.length ? top : audios
+    const pool = (top.length ? top : audios).filter((a) => !SF_EXT.has(path.extname(a.name).toLowerCase()))
     const a =
       pool.find((x) => SONG_PREF.includes(path.extname(x.name).toLowerCase())) ||
       pool.find((x) => path.extname(x.name).toLowerCase() !== '.wav') ||
@@ -475,8 +490,9 @@ ipcMain.handle('folder:resolveAssets', async (_e, opts = {}) => {
       if (ref) songPath = matchAudioByRef(byName, ref) || ''
       if (!songPath) {
         const SONG_PREF = ['.mp3', '.ogg', '.flac', '.m4a', '.wav']
+        const SF_EXT = new Set(['.sf2', '.sf3', '.sfz'])
         const top = list.filter((a) => !a.depth)
-        const pool = top.length ? top : list
+        const pool = (top.length ? top : list).filter((a) => !SF_EXT.has(path.extname(a.name).toLowerCase()))
         const a =
           pool.find((x) => SONG_PREF.includes(path.extname(x.name).toLowerCase())) ||
           pool.find((x) => path.extname(x.name).toLowerCase() !== '.wav') ||
@@ -514,6 +530,8 @@ ipcMain.handle('dialog:openFolder', async (_e, opts = {}) => {
 
 /** 保存对话框，返回路径或 null */
 ipcMain.handle('dialog:saveFile', async (_e, opts = {}) => {
+  // 自动化测试钩子：直接返回指定路径，跳过原生对话框
+  if (process.env.HSS_TEST_SAVE_FILE) return { canceled: false, path: process.env.HSS_TEST_SAVE_FILE }
   const prefs = await loadPrefs()
   const res = await dialog.showSaveDialog(win, {
     title: opts.title || '保存谱面',
@@ -1492,6 +1510,31 @@ ipcMain.handle('app:confirmClose', () => {
   return true
 })
 
+/**
+ * 应用设置文本文件 `settings.cfg` 的位置。
+ *
+ * - HSS_SETTING_FILE：自动化测试指定临时路径
+ * - 打包后的绿色版：就是 exe 旁边的那份（release/osu-hitsound-studio/settings.cfg），
+ *   整个文件夹拷走配置也跟着走；
+ * - 开发模式：userData/settings.cfg
+ *
+ * 只读目录（例如放进 Program Files）写不进去时，自动退到 userData，
+ * 并记在 settingsFallback 里，本次运行后续的读写/打开目录都用它。
+ */
+let settingsFallback = null
+
+function userSettingsFile() {
+  return path.join(app.getPath('userData'), 'settings.cfg')
+}
+
+function settingsFile() {
+  const forced = process.env.HSS_SETTING_FILE
+  if (forced) return forced
+  if (settingsFallback) return settingsFallback
+  if (app.isPackaged) return path.join(path.dirname(process.execPath), 'settings.cfg')
+  return userSettingsFile()
+}
+
 /** 语言包目录：userData/langs（没有就建） */
 function langDir() {
   const d = path.join(app.getPath('userData'), 'langs')
@@ -1591,6 +1634,64 @@ ipcMain.handle('app:openExternal', async (_e, url) => {
     return { ok: false, error: err && err.message ? String(err.message) : String(err) }
   }
 })
+// ---- settings.cfg（应用设置的文本持久化）----
+ipcMain.handle('settings:path', () => settingsFile())
+ipcMain.handle('settings:load', async () => {
+  const p = settingsFile()
+  try {
+    return { ok: true, path: p, text: await fsp.readFile(p, 'utf8'), exists: true }
+  } catch (err) {
+    // exe 旁边没有、但 userData 里有一份（只读目录的退路 / 之前版本留下的）→ 继续用那份
+    if (err && err.code === 'ENOENT' && p !== userSettingsFile()) {
+      try {
+        const text = await fsp.readFile(userSettingsFile(), 'utf8')
+        settingsFallback = userSettingsFile()
+        return { ok: true, path: settingsFallback, text, exists: true }
+      } catch {
+        /* 两份都没有，按“首次运行”处理 */
+      }
+    }
+    if (err && err.code === 'ENOENT') return { ok: true, path: p, text: '', exists: false }
+    return { ok: false, path: p, text: '', exists: false, error: err && err.message ? String(err.message) : String(err) }
+  }
+})
+ipcMain.handle('settings:save', async (_e, text) => {
+  const p = settingsFile()
+  // 统一 LF，别让 Windows 记事本改过的 CRLF 一直留在文件里
+  const body = String(text ?? '').replace(/\r\n/g, '\n')
+  const write = async (f) => {
+    await fsp.mkdir(path.dirname(f), { recursive: true })
+    await fsp.writeFile(f, body, 'utf8')
+  }
+  try {
+    await write(p)
+    return { ok: true, path: p }
+  } catch (err) {
+    // 只读目录：退到 userData，别让整个设置保存失败
+    if (p !== userSettingsFile()) {
+      try {
+        await write(userSettingsFile())
+        settingsFallback = userSettingsFile()
+        return { ok: true, path: settingsFallback, fallback: true }
+      } catch (err2) {
+        return { ok: false, path: settingsFallback, error: err2 && err2.message ? String(err2.message) : String(err2) }
+      }
+    }
+    return { ok: false, path: p, error: err && err.message ? String(err.message) : String(err) }
+  }
+})
+ipcMain.handle('settings:openDir', async () => {
+  const p = settingsFile()
+  if (!process.env.HSS_TEST_OPENPATH) {
+    try {
+      await shell.openPath(path.dirname(p))
+    } catch {
+      /* 打不开资源管理器不算错误 */
+    }
+  }
+  return true
+})
+
 ipcMain.handle('app:version', () => ({ electron: process.versions.electron, app: app.getVersion() }))
 ipcMain.handle('app:clipboardRead', () => clipboard.readText())
 ipcMain.handle('app:clipboardWrite', (_e, text) => {

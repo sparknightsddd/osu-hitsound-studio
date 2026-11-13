@@ -86,6 +86,7 @@ export function matchHitsounds(
   const out: MatchResult<HitsoundDef>[] = []
   for (const h of doc.hitsounds) {
     if (!h.name) continue
+    if (h.kind !== 'hitsound') continue // keysound 走 matchKeysounds
     if (h.defaultRef) continue // 官方默认音效走内置库
     const raw = h.value || ''
     if (!raw) continue
@@ -127,9 +128,9 @@ export function matchKeysounds(
   for (const h of doc.hitsounds) {
     if (h.kind !== 'keysound' || !h.name) continue
     const instrument = h.name
-    // 音色库 / 单一音效文件
+    // 音色库 / 单一音效文件（多文件模式没有单一主文件）
     const raw = h.value || ''
-    if (h.soundFont || h.path) {
+    if (h.keys?.mode !== 'multifile' && (h.soundFont || h.path)) {
       const { rel, base } = matchKey(raw)
       const hit = findEntry(entries, rel, base)
       libs.push({ target: h, instrument, relPath: rel, file: hit?.file ?? null, how: hit?.how ?? null })

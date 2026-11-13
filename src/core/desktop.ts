@@ -86,6 +86,13 @@ export interface CurrentMapsetResult {
 export interface DesktopApi {
   isElectron: boolean
   platform: string
+  /** settings.cfg 的路径（应用设置的文本文件） */
+  settingsPath?: () => Promise<string>
+  loadSettings?: () => Promise<{ ok: boolean; path: string; text: string; exists: boolean; error?: string }>
+  /** fallback = exe 目录写不进去，改存到了 userData */
+  saveSettings?: (text: string) => Promise<{ ok: boolean; path: string; error?: string; fallback?: boolean }>
+  /** 在资源管理器里打开 settings.cfg 所在目录 */
+  openSettingsDir?: () => Promise<boolean>
   openFiles: (opts?: any) => Promise<{ canceled: boolean; files: { name: string; path: string }[] }>
   openFolder: (opts?: any) => Promise<{ canceled: boolean; dir: string }>
   saveFile: (opts?: any) => Promise<{ canceled: boolean; path: string }>
@@ -137,7 +144,22 @@ export interface DesktopApi {
     text: string
     /** 导出前删掉本谱之前生成的 [[EZHS*]].osu */
     cleanOld?: boolean
-    files: { to: string; from: string[]; defaults: string[]; mix: boolean; mixMeta?: unknown }[]
+    /** 自定义输出 .osu 路径（「直接写入 .osu」用；给了就不再按 artist/title 选名字） */
+    osuPath?: string
+    /** 覆盖已有 .osu 前先备份成 .bak */
+    backup?: boolean
+    /** 难度名（只用于返回值/日志） */
+    version?: string
+    files: {
+      to: string
+      from: string[]
+      defaults: string[]
+      mix: boolean
+      mixMeta?: unknown
+      delays?: number[]
+      defaultDelays?: number[]
+      overwrite?: boolean
+    }[]
   }) => Promise<{
     ok: boolean
     dir?: string

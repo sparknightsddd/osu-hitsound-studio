@@ -25,6 +25,7 @@ import SoundLibrary from './SoundLibrary'
 import { isDesktop } from '../core/desktop'
 import { closeChart, importOsuSounds, openChartFolder } from '../core/actions'
 import { t } from '../i18n'
+import { openKeysoundImport } from './KeysoundImportDialog'
 
 export default function SideBar() {
   const view = useStore((s) => s.sidebar)
@@ -420,6 +421,14 @@ function SettingsPanel() {
       </div>
       <div className="section">
         <h4>{t('[Keysound] 乐器')}</h4>
+        <button
+          className="btn small"
+          style={{ width: '100%', marginBottom: 8 }}
+          title={t('按轨道 / 谱表把音符导进 [Keysound]')}
+          onClick={() => openKeysoundImport()}
+        >
+          {t('导入 MIDI / musictxt…')}
+        </button>
         {doc.hitsounds.filter((h) => h.kind === 'keysound' && h.name).length === 0 && (
           <div className="hint">{t('暂无（用 keysound 定义后，在 [Keysound] 首行花括号里引用）')}</div>
         )}
@@ -430,10 +439,18 @@ function SettingsPanel() {
               <label style={{ width: 92 }}>{h.name}</label>
               <div className="val mono hint">
                 {h.soundFont
-                  ? t('音色库') + ' ' + (h.path || h.value)
-                  : h.keys
-                    ? `${midiToName(h.keys.low)}~${midiToName(h.keys.high)} · ${h.keys.pattern}`
-                    : h.value}
+                  ? `${t('音色库')} bank ${h.keys?.bank ?? 0} / program ${h.keys?.program ?? 0}${
+                      h.keys?.percussion ? t('（打击乐）') : ''
+                    } · ${h.path || h.value}`
+                  : h.library === 'sfz'
+                    ? `SFZ · ${h.path || h.value}`
+                    : h.keys?.mode === 'multifile'
+                      ? `${midiToName(h.keys.low)}~${midiToName(h.keys.high)} · ${
+                          h.keys.fileList ? t('{n} 个文件', { n: h.keys.fileList.length }) : h.keys.pattern
+                        }`
+                      : h.keys?.mode === 'singlefile'
+                        ? `${t('单一文件')} · ${h.path || h.value}`
+                        : h.value}
               </div>
             </div>
           ))}

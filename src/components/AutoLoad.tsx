@@ -9,7 +9,7 @@ import {
   matchSong,
   type PickedEntry,
 } from '../core/fileMatch'
-import { singleKeyName } from '../core/keysound'
+import { loadKeysoundLibrary, type LibraryReader } from '../audio/keysoundLibrary'
 import { isDesktop, materializeFile, pickAssetEntries } from '../core/desktop'
 
 /**
@@ -88,21 +88,40 @@ export default function AutoLoad({ compact = false }: { compact?: boolean }) {
           ? `Keysound ✓ 自动绑定 ${kOk}/${ksFiles.length} 个音高样本`
           : `Keysound ✗ 0/${ksFiles.length} 个音高样本命中（检查路径模板，缺的音会改用内置合成音）`,
       )
+    const normPath = (p: string) => p.replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase()
+    const findAsset = (path: string) => {
+      const p = normPath(path)
+      const base = p.split('/').pop() || p
+      return (
+        entries.find((e) => e.path === p) ||
+        entries.find((e) => e.path.endsWith('/' + p)) ||
+        entries.find((e) => e.name.toLowerCase() === base) ||
+        null
+      )
+    }
     for (const l of libs) {
       if (!l.file) {
         lines.push(`乐器 ${l.instrument} ✗ 没找到 "${l.relPath}"`)
         continue
       }
-      if (l.target.soundFont) {
-        // .sf2/.sf3 需要专门的 SoundFont 合成器来解码，当前版本先用内置合成音发声
-        lines.push(
-          `乐器 ${l.instrument} ✓ 找到音色库 ${l.file.name}（.sf2/.sf3 尚未支持解码，暂用内置合成音试听）`,
-        )
-      } else {
-        // 单一 wav 的 keysound：所有音高共用这一个样本，不做变调
-        await engine.bindSample(singleKeyName(l.instrument), await materializeFile(l.file), false)
-        lines.push(`乐器 ${l.instrument} ✓ ${l.file.name}（单一文件，所有音高共用，不变调）`)
+      const mainFile = l.file
+      const baseDir = l.relPath.includes('/') ? l.relPath.slice(0, l.relPath.lastIndexOf('/')) : ''
+      const joinRel = (rel: string) => {
+        const r = normPath(rel)
+        if (/^[a-z]:\//i.test(r) || r.startsWith('/')) return r.split('/').pop() || r
+        return baseDir ? `${baseDir}/${r}` : r
       }
+      const reader: LibraryReader = {
+        readMain: async () => (await materializeFile(mainFile)).arrayBuffer(),
+        resolve: joinRel,
+        readPath: async (path) => {
+          const hit = findAsset(path)
+          if (!hit) return null
+          return (await materializeFile(hit.file)).arrayBuffer()
+        },
+      }
+      const res = await loadKeysoundLibrary(l.instrument, l.target, reader)
+      lines.push(res.note)
     }
 
     setBindings(bindings)

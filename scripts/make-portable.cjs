@@ -99,6 +99,30 @@ fs.writeFileSync(
   'utf8',
 )
 
+// settings.cfg：绿色版的设置就放在 exe 旁边，整个文件夹拷走配置也跟着走。
+// 已经存在就不动（用户可能已经改过）；全新打包时放一个只有说明的空壳，
+// 首次启动发现没有任何 [段] 会按默认值补全。
+const cfgPath = path.join(OUT, 'settings.cfg')
+if (!fs.existsSync(cfgPath)) {
+  fs.writeFileSync(
+    cfgPath,
+    [
+      '# ============================================================',
+      '#  osu Hitsound Studio · settings.cfg',
+      '#',
+      '#  This file lives next to the exe: take the folder anywhere and settings follow.',
+      '#  The first launch fills in the sections below with current defaults; hand edits work too.',
+      '#  Syntax: `key = value`, `[section]` headers, # or ; starts a comment.',
+      '# ============================================================',
+      '',
+    ].join('\n'),
+    'utf8',
+  )
+  console.log('已生成 settings.cfg（首次启动补全为完整配置）')
+} else {
+  console.log('保留已有 settings.cfg')
+}
+
 // 换掉默认图标/元信息（rcedit 不可用就跳过，不影响运行）
 const rcedit = path.join(ROOT, 'node_modules', 'rcedit', 'lib', 'index.js')
 

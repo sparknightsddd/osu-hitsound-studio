@@ -97,7 +97,12 @@ export default function SoundLibrary() {
       // 默认只展开根层：根目录下直接放文件时把「本目录」也展开，否则一片空的
       const tree = r.files.length ? buildTree(r.files) : null
       setOpenKeys(new Set(tree && !tree.dirs.length ? ['#self'] : []))
-      if (!r.ok) setErr(r.error === 'browser' ? '浏览器模式读不到本地文件夹' : `读取失败：${r.error || ''}`)
+      if (!r.ok)
+        setErr(
+          r.error === 'browser'
+            ? t('浏览器模式读不到本地文件夹')
+            : t('读取失败：{err}', { err: r.error || '' }),
+        )
     } finally {
       setBusy(false)
     }
@@ -288,10 +293,10 @@ export default function SoundLibrary() {
         </button>
       </div>
 
-      <div className="ms-path" title={folder || '未设置'}>
-        <span className="ms-path-text mono">{folder || '未设置音效文件夹'}</span>
+      <div className="ms-path" title={folder || t('未设置')}>
+        <span className="ms-path-text mono">{folder || t('未设置音效文件夹')}</span>
         <button className="btn small" onClick={() => void chooseFolder()}>
-          选择…
+          {t('选择…')}
         </button>
       </div>
 

@@ -174,21 +174,30 @@ function resample(src, sampleRate) {
   return { sampleRate, channels: src.channels, data: out }
 }
 
-/** 混音：统一采样率/声道，逐样本相加，超出 ±1 直接截断（和 Audacity 的 Mix and Render 一致） */
-function mixWavs(list) {
+/**
+ * 混音：统一采样率/声道，逐样本相加，超出 ±1 直接截断（和 Audacity 的 Mix and Render 一致）。
+ * @param delays 每个源的延迟（毫秒），缺省 0；successor 用它做「A -250ms- B」
+ */
+function mixWavs(list, delays) {
   const valid = list.filter(Boolean)
   if (!valid.length) return null
   const sampleRate = Math.max(...valid.map((w) => w.sampleRate))
   const channels = Math.max(...valid.map((w) => w.channels))
   const parts = valid.map((w) => resample(w, sampleRate))
-  const frames = Math.max(...parts.map((p) => p.data[0].length))
+  const offsets = parts.map((_, i) => {
+    const ms = (delays && delays[i]) || 0
+    return Math.max(0, Math.round((ms / 1000) * sampleRate))
+  })
+  const frames = Math.max(...parts.map((p, i) => p.data[0].length + offsets[i]))
   const data = []
   for (let c = 0; c < channels; c++) data.push(new Float32Array(frames))
-  for (const p of parts) {
+  for (let j = 0; j < parts.length; j++) {
+    const p = parts[j]
+    const off = offsets[j]
     for (let c = 0; c < channels; c++) {
       // 单声道素材铺到每个声道；多声道裁剪到目标声道数
       const src = p.data[Math.min(c, p.channels - 1)]
-      for (let i = 0; i < frames; i++) data[c][i] += src[i] || 0
+      for (let i = 0; i < src.length; i++) data[c][off + i] += src[i] || 0
     }
   }
   for (let c = 0; c < channels; c++) {
@@ -250,7 +259,7 @@ function writeWav16(file, mixed, meta) {
  * 读若干文件并混成一个 wav（不落盘）。
  * 返回 buffer，方便导出时先和目录里已有文件比对，再决定跳过还是报冲突。
  */
-function mixBuffers(sources, meta) {
+function mixBuffers(sources, meta, delays) {
   const errors = []
   const waves = []
   for (const p of sources) {
@@ -266,14 +275,14 @@ function mixBuffers(sources, meta) {
     }
   }
   if (!waves.length) return { ok: false, errors }
-  const mixed = mixWavs(waves)
+  const mixed = mixWavs(waves, delays)
   if (!mixed) return { ok: false, errors }
   return { ok: true, buffer: encodeWav16(mixed, meta), errors }
 }
 
 /** 读若干文件并混成一个 wav；读不了的文件会被跳过并记在 errors 里 */
-function mixFilesTo(sources, outPath, meta) {
-  const r = mixBuffers(sources, meta)
+function mixFilesTo(sources, outPath, meta, delays) {
+  const r = mixBuffers(sources, meta, delays)
   if (!r.ok) return { ok: false, errors: r.errors }
   fs.writeFileSync(outPath, r.buffer)
   return { ok: true, errors: r.errors }

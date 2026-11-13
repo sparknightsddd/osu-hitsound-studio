@@ -68,5 +68,36 @@ if (unused.length) {
   for (const k of unused.slice(0, 20)) console.log('  ' + k)
   if (unused.length > 20) console.log(`  …and ${unused.length - 20} more`)
 }
-if (!missing.length && !badVars.length) console.log('\n✓ all UI strings translated, placeholders match')
-process.exit(missing.length || badVars.length ? 1 : 0)
+// 其它内置语言包：按 en-US 的全部 key 校验覆盖率和占位符
+// （zh-CN 是回退基准，messages 为空；动态 t(variable) 的 key 也要算进来）
+const extraIds = ['zh-TW', 'ja-JP', 'ko-KR', 'ru-RU']
+let packBad = 0
+for (const id of extraIds) {
+  const file = path.join(ROOT, 'src/i18n/langs', `${id}.lang`)
+  if (!fs.existsSync(file)) {
+    console.log(`\n✗ 缺少内置语言包 ${id}.lang`)
+    packBad++
+    continue
+  }
+  const p = JSON.parse(fs.readFileSync(file, 'utf8')) as { messages?: Record<string, string> }
+  const tr = p.messages || {}
+  const miss = Object.keys(msgs).filter((k) => !tr[k])
+  const bad = Object.keys(msgs).filter((k) => tr[k] && vars(k).size !== vars(tr[k]).size)
+  const badList = Object.keys(msgs).filter((k) => {
+    if (!tr[k]) return false
+    return [...vars(k)].sort().join(',') !== [...vars(tr[k])].sort().join(',')
+  })
+  console.log(`\n${id}.lang: ${Object.keys(tr).length}/${Object.keys(msgs).length} entries`)
+  if (miss.length) {
+    console.log(`  ✗ missing (${miss.length}): ${miss.slice(0, 8).join(' | ')}`)
+    packBad += miss.length
+  }
+  if (badList.length) {
+    console.log(`  ✗ placeholder mismatch (${badList.length}): ${badList.slice(0, 8).join(' | ')}`)
+    packBad += badList.length
+  }
+  if (!miss.length && !badList.length) console.log('  ✓ complete, placeholders match')
+}
+
+if (!missing.length && !badVars.length && !packBad) console.log('\n✓ all UI strings translated, placeholders match')
+process.exit(missing.length || badVars.length || packBad ? 1 : 0)

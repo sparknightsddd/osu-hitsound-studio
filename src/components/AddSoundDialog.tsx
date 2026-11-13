@@ -238,7 +238,7 @@ export default function AddSoundDialog() {
                 colorTouched.current = true
                 setColorText('')
               }}
-              title="改回默认色"
+              title={t('改回默认色')}
             >
               {t('默认')}
             </button>

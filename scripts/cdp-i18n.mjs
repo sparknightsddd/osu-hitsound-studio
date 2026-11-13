@@ -101,6 +101,11 @@ T('默认界面是中文', before.lang === 'zh-CN' && before.save === '保存', 
 const list = await ev(`window.__i18n.listLangs().map((p) => p.id)`)
 console.log('LANGS', JSON.stringify(list))
 T('内置 zh-CN / en-US', list.includes('zh-CN') && list.includes('en-US'), JSON.stringify(list))
+T(
+  '内置繁中 / 日 / 韩 / 俄',
+  ['zh-TW', 'ja-JP', 'ko-KR', 'ru-RU'].every((x) => list.includes(x)),
+  JSON.stringify(list),
+)
 T('userData/langs 里的语言包被加载', list.includes('xx-XX'), JSON.stringify(list))
 
 // 切到英文
@@ -133,6 +138,77 @@ console.log('SETTINGS', JSON.stringify(setInfo))
 T('语言页选中 en-US', setInfo.value === 'en-US', setInfo.value)
 T('列表中能看到第三方语言包', setInfo.options.some((o) => o.startsWith('xx-XX:')), JSON.stringify(setInfo.options))
 T('语言页标题英文', /language/i.test(setInfo.title) && !/[一-龥]/.test(setInfo.title), setInfo.title)
+
+// 六个页签都不该再有中文（语言自己的名字、JSON 示例除外）
+const cjkTabs = []
+for (let i = 0; i < 6; i++) {
+  await ev(`document.querySelectorAll('.set-tab')[${i}]?.click()`)
+  await wait(150)
+  const bad = await ev(`(() => {
+    const out = []
+    const walk = (n) => {
+      if (n.nodeType === 3) {
+        const s = n.textContent.trim()
+        const langNames = ['简体中文', '繁體中文', '日本語', '한국어', 'Русский']
+        if (/[\u4e00-\u9fff]/.test(s) && !langNames.some((n) => s.includes(n)) && !s.includes('"messages"'))
+          out.push(s.slice(0, 80))
+        return
+      }
+      if (n.nodeType !== 1) return
+      for (const c of n.childNodes) walk(c)
+    }
+    walk(document.querySelector('.set-dialog'))
+    return out
+  })()`)
+  cjkTabs.push(bad)
+}
+console.log('CJK_TABS', JSON.stringify(cjkTabs))
+T('设置窗 6 页没有残留中文', cjkTabs.every((x) => x.length === 0), JSON.stringify(cjkTabs))
+
+await ev(`document.querySelector('.set-dialog .osu-diff-cancel')?.click()`)
+await wait(300)
+
+// 四个新语言包：标题/文案确实换了语言
+{
+  const cases = [
+    ['zh-TW', '設定'],
+    ['ja-JP', '設定'],
+    ['ko-KR', '설정'],
+    ['ru-RU', 'Настройки'],
+  ]
+  for (const [id, word] of cases) {
+    await ev(`window.__i18n.setLang(${JSON.stringify(id)})`)
+    await wait(350)
+    const lang = await ev(`document.documentElement.lang`)
+    const title = await ev(`window.__i18n.t('设置')`)
+    T(`${id} 生效`, lang === id && title === word, `${lang} / ${title}`)
+  }
+}
+
+// 跟随系统：模拟系统语言为俄语，选择 auto 后应解析成 ru-RU
+await ev(`Object.defineProperty(navigator, 'languages', { configurable: true, get: () => ['ru-RU'] }); 1`)
+await ev(`window.__i18n.setLang('auto')`)
+await wait(400)
+const auto = {
+  lang: await ev(`document.documentElement.lang`),
+  sel: await ev(`window.__i18n.langSelection()`),
+  save: await ev(`window.__i18n.t('保存')`),
+}
+console.log('AUTO', JSON.stringify(auto))
+T('auto 保留为跟随系统', auto.sel === 'auto', auto.sel)
+T('auto 按系统语言解析成 ru-RU', auto.lang === 'ru-RU', auto.lang)
+T('auto 后文案是俄语', auto.save === 'Сохранить', auto.save)
+
+// 设置页下拉框里要有「跟随系统」选项，且选中 auto
+await ev(`window.__openAppSettings()`)
+await wait(400)
+await ev(`[...document.querySelectorAll('.set-tab')].find((b) => /Язык|Language/.test(b.textContent))?.click()`)
+await wait(300)
+const autoSel = await ev(`(() => {
+  const sel = document.querySelector('.set-dialog select')
+  return JSON.stringify({ value: sel?.value, hasAuto: [...(sel?.options || [])].some((o) => o.value === 'auto') })
+})()`)
+T('设置页有「跟随系统」且选中它', JSON.parse(autoSel).value === 'auto' && JSON.parse(autoSel).hasAuto, autoSel)
 await ev(`document.querySelector('.set-dialog .osu-diff-cancel')?.click()`)
 await wait(300)
 

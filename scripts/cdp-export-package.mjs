@@ -94,10 +94,11 @@ console.log(
 )
 await wait(900)
 
+// 先打开「文件」菜单，再点「导出音效包」（标题栏没有常驻按钮）
 console.log(
   'BTN',
   await ev(`(() => {
-    const b = [...document.querySelectorAll('button')].find((x) => x.textContent.includes('导出音效包'))
+    const b = [...document.querySelectorAll('button')].find((x) => /导出音效包|Export sound package/.test(x.textContent))
     if (!b) return 'missing'
     b.click()
     return 'clicked'

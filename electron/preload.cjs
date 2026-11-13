@@ -51,6 +51,11 @@ contextBridge.exposeInMainWorld('desktop', {
 
   // ---- 应用 ----
   getPrefs: () => ipcRenderer.invoke('app:getPrefs'),  setPrefs: (patch) => ipcRenderer.invoke('app:setPrefs', patch),
+  // settings.cfg：应用设置的文本文件
+  settingsPath: () => ipcRenderer.invoke('settings:path'),
+  loadSettings: () => ipcRenderer.invoke('settings:load'),
+  saveSettings: (text) => ipcRenderer.invoke('settings:save', text),
+  openSettingsDir: () => ipcRenderer.invoke('settings:openDir'),
   openPath: (p) => ipcRenderer.invoke('app:openPath', p),
   /** 用系统默认程序打开链接（osu://edit/… 唤起 osu! 编辑器） */
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
@@ -93,6 +98,7 @@ contextBridge.exposeInMainWorld('desktop', {
       'menu:importSounds',
       'menu:exportOsu',
       'menu:exportOsuPackage',
+      'menu:writeOsuHitsounds',
       'menu:exportCsv',
       'menu:exportJson',
       'menu:exportTxt',

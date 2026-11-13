@@ -67,6 +67,28 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
+/** 顿号 / 逗号：中英日韩俄各自的列表分隔符 */
+const listSep = () => tr('、')
+
+/** 把冲突原因按当前语言拼出来（msgid 里的 {names} / {detail} 要先按语言连接） */
+function conflictText(c: {
+  reason: string
+  reasonKey?: string
+  reasonVars?: Record<string, string | number>
+  reasonList?: string[]
+  reasonParts?: { name: string; sets: string[] }[]
+}): string {
+  if (!c.reasonKey) return c.reason
+  const vars: Record<string, string | number> = { ...(c.reasonVars || {}) }
+  if (c.reasonList?.length) vars.names = c.reasonList.join(listSep())
+  if (c.reasonParts?.length) {
+    vars.detail = c.reasonParts
+      .map((p) => tr('{name} 在 {sets}', { name: p.name, sets: p.sets.join('/') }))
+      .join(listSep())
+  }
+  return tr(c.reasonKey, vars)
+}
+
 export default function ReviewDialog() {
   const [, force] = useState(0)
   const doc = useStore((s) => s.doc)
@@ -133,17 +155,30 @@ export default function ReviewDialog() {
   const listText = (): string => {
     if (tab === 'conflict') {
       return report.conflicts
-        .map((c) => `[${c.names.join(' ')}]（${c.count} 处）\n  ${c.reason}\n  ${c.times.map(fmtOsuTime).join('、')}`)
+        .map(
+          (c) =>
+            `${tr('[{names}]（{n} 处）', { names: c.names.join(' '), n: c.count })}\n  ${conflictText(c)}\n  ${c.times
+              .map(fmtOsuTime)
+              .join(listSep())}`,
+        )
         .join('\n')
     }
     return report.dup.rows
-      .map((r) => `${r.to}（${r.codes.map((c) => c || tr('白板')).join(' + ')}）\n  ${r.times.map(fmtOsuTime).join('、')}`)
+      .map(
+        (r) =>
+          `${tr('{file}（{codes}）', {
+            file: r.to,
+            codes: r.codes.map((c) => c || tr('白板')).join(' + '),
+          })}\n  ${r.times.map(fmtOsuTime).join(listSep())}`,
+      )
       .join('\n')
   }
 
   const doCopy = async () => {
     const ok = await copyText(listText())
-    useStore.getState().log(ok ? '✓ 已复制审阅清单到剪贴板' : '✗ 复制失败（剪贴板不可用）')
+    useStore
+      .getState()
+      .log(ok ? tr('✓ 已复制审阅清单到剪贴板') : tr('✗ 复制失败（剪贴板不可用）'))
   }
 
   return (
@@ -242,7 +277,7 @@ export default function ReviewDialog() {
                               {fmtOsuTime(r.last)}
                             </button>
                           ) : (
-                            <span className="rv-dim">{r.first != null ? '同上' : '—'}</span>
+                            <span className="rv-dim">{r.first != null ? tr('同上') : '—'}</span>
                           )}
                         </span>
                       </div>
@@ -259,7 +294,9 @@ export default function ReviewDialog() {
             report.conflicts.length ? (
               <>
                 <div className="rv-sum">
-                  <span className="rv-warn">{report.conflicts.length} 个叠音组合排不出合法槽位</span>
+                  <span className="rv-warn">
+                    {tr('{n} 个叠音组合排不出合法槽位', { n: report.conflicts.length })}
+                  </span>
                   <span className="rv-dim">{tr('导出时这些组合会被跳过，先改 [Define]')}</span>
                 </div>
                 {report.conflicts.map((c) => {
@@ -271,9 +308,9 @@ export default function ReviewDialog() {
                       <div className="rv-card-head">
                         <em className="rv-tag bad">{tr('冲突')}</em>
                         <span className="mono rv-names">[{c.names.join(' ')}]</span>
-                        <span className="rv-dim">{c.count} 处</span>
+                        <span className="rv-dim">{tr('{n} 处', { n: c.count })}</span>
                       </div>
-                      <div className="rv-reason">{c.reason}</div>
+                      <div className="rv-reason">{conflictText(c)}</div>
                       <div className="rv-times">
                         {times.map((t, i) => (
                           <button key={i} className="rv-chip mono" onClick={() => jump(t)} title={tr('跳到时间轴')}>
@@ -282,7 +319,7 @@ export default function ReviewDialog() {
                         ))}
                         {c.times.length > TIME_HEAD ? (
                           <button className="rv-more" onClick={() => toggleAll(key)}>
-                            {all ? '收起' : `展开全部（${c.times.length}）`}
+                            {all ? tr('收起') : tr('展开全部（{n}）', { n: c.times.length })}
                           </button>
                         ) : null}
                       </div>
@@ -293,7 +330,7 @@ export default function ReviewDialog() {
             ) : (
               <div className="rv-empty ok">
                 <span className="rv-ok-mark">✓</span>
-                没有槽位冲突 —— 这份谱里所有叠音组合都能排出合法槽位
+                {tr('没有槽位冲突 —— 这份谱里所有叠音组合都能排出合法槽位')}
               </div>
             )
           ) : null}
@@ -302,7 +339,7 @@ export default function ReviewDialog() {
             <>
               {report.dup.errors.length ? (
                 <div className="rv-note">
-                  <b>导出计划里还有 {report.dup.errors.length} 个问题</b>
+                  <b>{tr('导出计划里还有 {n} 个问题', { n: report.dup.errors.length })}</b>
                   <span className="rv-dim">{tr('（这些会先挡住导出，混音清单可能不完整）')}</span>
                   {report.dup.errors.slice(0, 5).map((e, i) => (
                     <div key={i} className="rv-err mono">
@@ -310,7 +347,7 @@ export default function ReviewDialog() {
                     </div>
                   ))}
                   {report.dup.errors.length > 5 ? (
-                    <div className="rv-dim">…还有 {report.dup.errors.length - 5} 条</div>
+                    <div className="rv-dim">{tr('…还有 {n} 条', { n: report.dup.errors.length - 5 })}</div>
                   ) : null}
                 </div>
               ) : null}
@@ -318,11 +355,11 @@ export default function ReviewDialog() {
               {report.dup.rows.length ? (
                 <>
                   <div className="rv-sum">
+                    <span>{tr('{n} 个槽位需要混音', { n: report.dup.rows.length })}</span>
                     <span>
-                      <b>{report.dup.rows.length}</b> 个槽位需要混音
-                    </span>
-                    <span>
-                      共 <b>{report.dup.rows.reduce((n, r) => n + r.times.length, 0)}</b> 处重复槽位音效
+                      {tr('共 {n} 处重复槽位音效', {
+                        n: report.dup.rows.reduce((n, r) => n + r.times.length, 0),
+                      })}
                     </span>
                     <span className="rv-dim">{tr('导出时会写 HSSM，重新导入能拆回代号')}</span>
                   </div>
@@ -336,11 +373,11 @@ export default function ReviewDialog() {
                           <em className="rv-tag warn">{tr('混音')}</em>
                           <span className="mono rv-names">{r.to}</span>
                           <span className="mono rv-dim">#{r.index}</span>
-                          <span className="rv-dim">{r.times.length} 处</span>
+                          <span className="rv-dim">{tr('{n} 处', { n: r.times.length })}</span>
                         </div>
                         <div className="rv-reason">
                           <span className="mono">[{r.codes.map((c) => c || tr('白板')).join(' + ')}]</span>{' '}
-                          挤在同一个槽位上
+                          {tr('挤在同一个槽位上')}
                         </div>
                         <div className="rv-times">
                           {times.map((t, i) => (

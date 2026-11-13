@@ -67,6 +67,7 @@ import { openExternalUrl } from '../core/desktop'
 import { SLOT_HITS, SLOT_SETS } from '../core/soundSlots'
 import { countHitsoundRefs } from '../core/defineEdit'
 import { fmtOsuTime, osuEditUrl } from '../core/time'
+import { fadeVolumePoints } from '../core/volumeFade'
 import { updateSectionsText } from '../core/sections'
 import {
   codeGlyph,
@@ -191,12 +192,24 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
   const div = useStore((s) => s.div)
   const follow = useStore((s) => s.follow)
   const [cell, setCell] = useState(26)
-  /** 调格大小时要固定的锚点：时间 + 它所在行的顶边相对视口的偏移 */
+  /** 调格大小/细分时固定的锚点：时间 + 它所在行的顶边相对视口的偏移 */
   const cellAnchor = useRef<{ time: number; offset: number } | null>(null)
   /** 调格大小后按时间重映射选区端点（行/列坐标会随排版变化） */
   const pendingSel = useRef<{ a: number | null; b: number | null } | null>(null)
   /** 重映射过选区后，跳过那一轮「夹选区」的被动 effect */
   const skipClamp = useRef(false)
+  /**
+   * `.gd-scroll` 的 padding-top 缓存：rowTops 不含它，算视口中线时要减掉。
+   * 滚动时每帧都读 getComputedStyle 会触发布局，缓存一次即可（padding 不会变）。
+   */
+  const padTopRef = useRef<number | null>(null)
+  const scrollPadTop = () => {
+    if (padTopRef.current == null) {
+      const el = wrapRef.current
+      padTopRef.current = el ? parseFloat(getComputedStyle(el).paddingTop) || 0 : 0
+    }
+    return padTopRef.current
+  }
   /** 画笔类型与锁定代号：放 store 里，切到文本再切回来不丢 */
   const brushMode = useStore((s) => s.brushMode)
   const setBrushMode = useStore((s) => s.setBrushMode)
@@ -234,12 +247,22 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
   /** 上次用的查找条件（关掉再打开时留着，省得重敲） */
   const lastFind = useRef({ find: '', repl: '', exact: false, onlyMatched: true })
   /** 查找替换弹窗 */
-  const openFind = () => setFindDlg((d) => d ?? { ...lastFind.current })
+  const openFind = () =>
+    setFindDlg(
+      (d) =>
+        d ?? {
+          ...lastFind.current,
+          // 只选 1 格 / 没选 = 全谱；多选时把当时的格子键冻结下来
+          scope: selCells.length > 1 ? selCells.map((c) => `${c.mi}:${c.k}`) : undefined,
+        },
+    )
   const [findDlg, setFindDlg] = useState<{
     find: string
     repl: string
     exact: boolean
     onlyMatched: boolean
+    /** 打开时冻结的查找范围（多选）；「查找下一项」改选区时不能跟着缩范围 */
+    scope?: string[]
   } | null>(null)
 
   /** 关掉弹窗，顺手记住这次的查找条件 */
@@ -256,6 +279,10 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
   }
   /** 右键「修改音量」的输入框（cells 是这次要改的格子：单选是一整段，多选是选中的那些） */
   const [volDlg, setVolDlg] = useState<{ cells: { mi: number; k: number }[]; value: string; span: boolean } | null>(
+    null,
+  )
+  /** 右键「添加渐变音量」：cells 是连续选区（按阅读顺序），三个值都是输入框里的字符串 */
+  const [fadeDlg, setFadeDlg] = useState<{ cells: GridCell[]; start: string; end: string; step: string } | null>(
     null,
   )
   /** 当前选中的缝隙（点一下，按 Enter 分节） */
@@ -819,10 +846,15 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
   /**
    * 物件按「覆盖到哪几行」分组：跨行的滑条/转盘会同时出现在多行里，
    * 每行只画到行尾（下一行接着画），不再只在起点那一行画完。
+   *
+   * 末尾刚好落在某行首格（时间 == 该行起始时间）的滑条/转盘也算跨到那一行：
+   * 否则会在上一行最右边直接画收尾弧，和「结束时间落在首格中心」的语义对不上，
+   * 也会和末尾晚 1ms 就跨行的表现不一致。circle 始终只画在起点那一行。
    */
-  const objectsByRow = useMemo(() => {
-    const map = new Map<number, OsuTimelineObject[]>()
-    if (!osuObjects.length || !rowSpans.length) return map
+  const objLanes = useMemo(() => {
+    const byRow = new Map<number, OsuTimelineObject[]>()
+    const range = new Map<OsuTimelineObject, { first: number; last: number }>()
+    if (!osuObjects.length || !rowSpans.length) return { byRow, range }
     for (const o of osuObjects) {
       let lo = 0
       let hi = rowSpans.length - 1
@@ -837,15 +869,19 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
       if (ri < 0) continue
       // 超出最后一行末尾的物件不画（网格没铺到那么远）
       if (o.start >= rowSpans[ri].end - SNAP_MS) continue
+      let last = ri
       for (let r = ri; r < rowSpans.length; r++) {
-        // 起点所在行一定要放（circle 的 start 和 end 相同）；之后的续行才看是否已经结束
-        if (r > ri && rowSpans[r].start >= o.end - SNAP_MS) break
-        const arr = map.get(r)
+        // 起点所在行一定要放（circle 的 start 和 end 相同）；之后的续行才看是否已经结束。
+        // 用 > 而不是 >=：结束时间正好等于行首格时间时，仍跨到这一行收尾。
+        if (r > ri && (o.kind === 'circle' || rowSpans[r].start > o.end + SNAP_MS)) break
+        const arr = byRow.get(r)
         if (arr) arr.push(o)
-        else map.set(r, [o])
+        else byRow.set(r, [o])
+        last = r
       }
+      range.set(o, { first: ri, last })
     }
-    return map
+    return { byRow, range }
   }, [osuObjects, rowSpans])
 
   const ordOf = (p: CellRef | null) => (p ? (rowStart[p.row] ?? 0) + p.col : -1)
@@ -1048,9 +1084,9 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
    * 不该把查找范围悄悄缩到那一格（真缩了会让人以为「找不到」）。
    */
   const findScope = useMemo(() => {
-    if (selCells.length <= 1) return null
-    return new Set(selCells.map((c) => `${c.mi}:${c.k}`))
-  }, [selCells])
+    if (!findDlg?.scope?.length) return null
+    return new Set(findDlg.scope)
+  }, [findDlg])
 
   /** 普通点击 / 拖选 / Shift 连选会覆盖掉所有附加选区 */
   const clearMulti = () => {
@@ -1171,6 +1207,19 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
     const last = r.chunks[r.chunks.length - 1]
     const ticks = ticksByMeasure[last.mi]
     return ticks?.[last.from + last.count - 1] ?? null
+  }
+
+  /** 视觉坐标 → 格子键（`mi:k`，和 extraSel / 多选区共用） */
+  const keyAt = (row: number, col: number): string | null => {
+    const r = layout.rows[row]
+    if (!r) return null
+    let acc = 0
+    for (const ch of r.chunks) {
+      if (col < acc + ch.count) return `${ch.mi}:${ch.from + (col - acc)}`
+      acc += ch.count
+    }
+    const last = r.chunks[r.chunks.length - 1]
+    return last ? `${last.mi}:${last.from + last.count - 1}` : null
   }
 
   /** 时间 → 视觉坐标（播放头用） */
@@ -1328,8 +1377,7 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
         t = timeAt(row, selCells[0].col)
       } else {
         // rowTops 不含 .gd-scroll 的 padding-top，取中点时要减掉
-        const padTop = parseFloat(getComputedStyle(el).paddingTop) || 0
-        const mid = el.scrollTop + el.clientHeight / 2 - padTop
+        const mid = el.scrollTop + el.clientHeight / 2 - scrollPadTop()
         let lo = 0
         let hi = rowTops.length - 1
         while (lo <= hi) {
@@ -1348,6 +1396,59 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
     }
     setCell(next)
   }
+
+  /**
+   * 细分变化时保持视图位置：和调格大小用同一套锚点。
+   * 格数从 div=4 变成 div=8 时每行格子数会变，scrollTop 不变的话视口会跳到别处；
+   * 这里把「选区第一格所在行」在屏幕上的位置锁住，没有选区时锁视口中线那一行。
+   *
+   * 锚点由下面的 recorder 在每次布局稳定后记录；这里只在 div 变化的那一帧
+   * 把上一份锚点交给共用的恢复逻辑（useLayoutEffect 按声明顺序执行，
+   * 所以这段必须写在恢复逻辑之前）。
+   */
+  const savedView = useRef<{
+    div: number
+    time: number | null
+    offset: number | null
+    a: number | null
+    b: number | null
+    /** Ctrl 点选的零散格子（按时间存，细分变了要重新算 `mi:k`） */
+    extra: { key: string; time: number | null }[]
+    /** Ctrl 拖出来的附加区间 */
+    regions: { a: number | null; b: number | null; rect: boolean }[]
+    /** 被 Ctrl 取消掉的格子 */
+    cut: { key: string; time: number | null }[]
+  } | null>(null)
+
+  useLayoutEffect(() => {
+    const prev = savedView.current
+    if (!prev || prev.div === div) return
+    if (prev.time == null || prev.offset == null) return
+    cellAnchor.current = { time: prev.time, offset: prev.offset }
+    // 选区也要按时间重映射：同样的 500ms，在 1/4 里是第 3 格，在 1/8 里是第 5 格
+    pendingSel.current = prev.a != null || prev.b != null ? { a: prev.a, b: prev.b } : null
+
+    // Ctrl 多选也按时间重算键位，否则 `mi:k` 里的 k 会指向另一个时刻
+    const remap = (t: number | null) => {
+      if (t == null) return null
+      const at = locateTime(t)
+      return at ? keyAt(at.row, at.col) : null
+    }
+    if (prev.extra.length) {
+      setExtraSel(new Set(prev.extra.map((x) => remap(x.time)).filter((k): k is string => !!k)))
+    }
+    if (prev.regions.length) {
+      setExtraRegions(
+        prev.regions
+          .map((r) => ({ aKey: remap(r.a), bKey: remap(r.b), rect: r.rect }))
+          .filter((r): r is SelRegion => !!r.aKey && !!r.bKey),
+      )
+    }
+    if (prev.cut.length) {
+      setCutSel(new Set(prev.cut.map((x) => remap(x.time)).filter((k): k is string => !!k)))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [div])
 
   // 新布局渲染完、绘制前：按时间重映射选区 + 把锚点行挪回原来的屏幕位置
   useLayoutEffect(() => {
@@ -1384,6 +1485,46 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
     el.scrollTop = next
     setScrollTop(next)
   }, [cell, rowSpans, rowTops])
+
+  /**
+   * 每次布局稳定后记下「锚点行 + 选区时间」，供下一次细分变化复用。
+   * 有选区时锁选区第一格所在行；没有选区时锁视口中线所在行（和 changeCellSize 一致）。
+   */
+  useLayoutEffect(() => {
+    const el = wrapRef.current
+    if (!el || !rowTops.length) return
+    let row = 0
+    if (selCells.length) {
+      row = selCells[0].row
+    } else {
+      // rowTops 不含 .gd-scroll 的 padding-top，取中点时要减掉
+      const mid = el.scrollTop + el.clientHeight / 2 - scrollPadTop()
+      let lo = 0
+      let hi = rowTops.length - 1
+      while (lo <= hi) {
+        const m = (lo + hi) >> 1
+        if (rowTops[m] <= mid) {
+          row = m
+          lo = m + 1
+        } else hi = m - 1
+      }
+    }
+    const keyTime = (key: string): number | null => {
+      const [mi, k] = key.split(':').map(Number)
+      return ticksByMeasure[mi]?.[k] ?? null
+    }
+    savedView.current = {
+      div,
+      time: selCells.length ? timeAt(selCells[0].row, selCells[0].col) : (rowSpans[row]?.start ?? null),
+      offset: (rowTops[row] ?? 0) - el.scrollTop,
+      a: selA ? timeAt(selA.row, selA.col) : null,
+      b: selB ? timeAt(selB.row, selB.col) : null,
+      extra: [...extraSel].map((key) => ({ key, time: keyTime(key) })),
+      regions: extraRegions.map((r) => ({ a: keyTime(r.aKey), b: keyTime(r.bKey), rect: r.rect })),
+      cut: [...cutSel].map((key) => ({ key, time: keyTime(key) })),
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [div, selA, selB, selCells, scrollTop, rowTops, rowSpans, ticksByMeasure, extraSel, extraRegions, cutSel])
 
   /** 选中一格（seek；不试听） */
   const selectCell = (row: number, col: number, extend = false) => {
@@ -2116,6 +2257,8 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
           cols,
           rect: true,
           mode: ksSel ? 'keysound' : 'hitsound',
+          sourceFileId: f.id,
+          sourceKeys: targets.map((t) => `${t.mi}:${t.k}`),
           items: targets.map((t, i) => ({ dr: t.row - minRow, dc: t.col - minCol, cell: clipCells[i] })),
         }
       : {
@@ -2123,6 +2266,8 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
           cols: targets.length,
           rect: false,
           mode: ksSel ? 'keysound' : 'hitsound',
+          sourceFileId: f.id,
+          sourceKeys: targets.map((t) => `${t.mi}:${t.k}`),
           items: clipCells.map((cell, i) => ({ dr: 0, dc: i, cell })),
         }
     setGridClip(clip)
@@ -2161,13 +2306,24 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
       st.log(tr('剪贴板是从另一种模式复制的，先切回去再粘贴'))
       return false
     }
+    // 复制后源选区通常还亮着；用户 Ctrl 点目标格时它也会一起算进 targets。
+    // 同一份谱里把「被复制的那些格子」从锚点里排除，剩下的才是真正要贴的位置。
+    const fid = currentFile()?.id
+    const srcKeys =
+      clip.sourceKeys?.length && clip.sourceFileId && clip.sourceFileId === fid
+        ? new Set(clip.sourceKeys)
+        : null
+    const rest = srcKeys ? targets.filter((t) => !srcKeys.has(`${t.mi}:${t.k}`)) : targets
+    // 只选回了复制源（原地粘贴）时仍按整个选区处理
+    const spots = [...(rest.length ? rest : targets)].sort((a, b) => ordOf(a) - ordOf(b))
+
     let pairs: { cell: GridCell; data: ClipCell }[] = []
     if (clip.items.length === 1) {
       // 复制了一格 → 铺满整个选区
       pairs = targets.map((cell) => ({ cell, data: clip.items[0].cell }))
     } else if (clip.rect && clip.rows > 1) {
-      // 矩形块（典型：一竖排）→ 以选区第一格为左上角，按行列偏移铺；目标行不够长就跳过
-      const base = targets[0]
+      // 矩形块（典型：一竖排）→ 以第一个锚点为左上角，按行列偏移铺；目标行不够长就跳过
+      const base = spots[0]
       for (const it of clip.items) {
         const r = base.row + it.dr
         const c = base.col + it.dc
@@ -2183,9 +2339,29 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
       if (pairs.length < clip.items.length)
         st.log(`粘贴时跳过 ${clip.items.length - pairs.length} 格（目标位置超出网格范围）`)
     } else {
-      // 单行 / 线性一串 → 从选区第一格起按阅读顺序往后铺（跨行也连续）
-      const list = cellsFrom(targets[0], clip.items.length)
-      pairs = list.map((cell, i) => ({ cell, data: clip.items[i]?.cell })).filter((p) => !!p.data)
+      // 单行 / 线性片段：从锚点起按阅读顺序往后铺（跨行也连续）。
+      // 如果锚点不止一个，且每两个相邻锚点之间都容得下整段，就在每个锚点各贴一份
+      // —— 「复制 ABCD，Ctrl 点第 2/3/4 拍，粘贴」一次贴成 ABCD×4。
+      const len = clip.items.length
+      let repeat = spots.length > 1
+      for (let i = 0; repeat && i + 1 < spots.length; i++) {
+        if (ordOf(spots[i + 1]) - ordOf(spots[i]) < len) repeat = false
+      }
+      const pasteAt = (base: GridCell) => {
+        const out: { cell: GridCell; data: ClipCell }[] = []
+        const list = cellsFrom(base, len)
+        for (let i = 0; i < list.length && i < len; i++) {
+          const d = clip.items[i]
+          if (d) out.push({ cell: list[i], data: d.cell })
+        }
+        return out
+      }
+      if (repeat) {
+        pairs = spots.flatMap(pasteAt)
+        st.log(tr('粘贴了 {n} 份（每份 {m} 格）', { n: spots.length, m: len }))
+      } else {
+        pairs = pasteAt(spots[0])
+      }
     }
     if (!pairs.length) return false
     return applyEdits(
@@ -2296,6 +2472,64 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
     if (ok) setVolDlg(null)
   }
 
+  /** 右键「添加渐变音量…」：只对连续选区有意义（至少 2 格） */
+  const openFadeDialog = (scope: GridCell[]) => {
+    if (scope.length < 2) return
+    const first = scope[0]
+    const last = scope[scope.length - 1]
+    const start = volInfo.at.get(`${first.mi}:${first.k}`) ?? 100
+    const end = volInfo.at.get(`${last.mi}:${last.k}`) ?? 100
+    setFadeDlg({ cells: [...scope], start: String(start), end: String(end), step: '1' })
+  }
+
+  /** 把渐变写成一组 `<v>`：关键帧强制写，区域里原有的其它 `<v>` 清掉，末尾之后恢复原音量 */
+  const applyFade = () => {
+    if (!fadeDlg) return
+    // 空输入框 Number('') = 0，必须单独判空，否则清空结束音量会被当成 0
+    const volOk = (s: string) => {
+      if (!s.trim()) return false
+      const n = Number(s)
+      return Number.isInteger(n) && n >= 0 && n <= 100
+    }
+    const stepOk = (s: string) => s.trim() !== '' && Number.isInteger(Number(s)) && Number(s) >= 1
+    if (!volOk(fadeDlg.start) || !volOk(fadeDlg.end) || !stepOk(fadeDlg.step)) return
+    const start = Number(fadeDlg.start)
+    const end = Number(fadeDlg.end)
+    const step = Number(fadeDlg.step)
+
+    const cells = fadeDlg.cells
+    const points = fadeVolumePoints(cells.length, start, end, step)
+    if (!points.length) return
+    const keyOf = (c: GridCell) => `${c.mi}:${c.k}`
+    const keys = new Set(points.map((p) => keyOf(cells[p.at])))
+    const edits: CellEdit[] = []
+
+    // 区域里原有的 <v> 如果不在关键帧上，会打断线性渐变，先清掉让它继承前一个关键帧
+    for (const c of cells) {
+      if (!keys.has(keyOf(c)) && volInfo.mark.has(keyOf(c))) {
+        edits.push({ mi: c.mi, k: c.k, next: (cur: string[]) => cur, volumeClear: true })
+      }
+    }
+    for (const p of points) {
+      const c = cells[p.at]
+      edits.push({ mi: c.mi, k: c.k, next: (cur: string[]) => cur, volume: p.volume, volumeForce: true })
+    }
+
+    // 区域结束后的那一格：恢复成它原来生效的音量，否则后面的空格子会一直沿用 end
+    const last = cells[cells.length - 1]
+    const ticks = (ticksByMeasure[last.mi] || []).length
+    const nextMi = last.k + 1 >= ticks ? last.mi + 1 : last.mi
+    const nextK = last.k + 1 >= ticks ? 0 : last.k + 1
+    if (nextMi < doc.measures.length) {
+      const back = volInfo.at.get(`${nextMi}:${nextK}`) ?? 100
+      if (back !== end) {
+        edits.push({ mi: nextMi, k: nextK, next: (cur: string[]) => cur, volume: back, volumeForce: true })
+      }
+    }
+
+    if (applyEdits(edits)) setFadeDlg(null)
+  }
+
   /** 删掉选中格子里正文写着的 `<v=xx>`：这一格和后面沿用它音量的格子回到前一段的音量 */
   const clearVolume = (scope: GridCell[]) => {
     const targets = scope.filter((c) => volInfo.mark.has(`${c.mi}:${c.k}`))
@@ -2306,6 +2540,30 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
   }
 
   /** 右键：落在选区外就先把选区移到这一格，再弹菜单 */
+  /**
+   * 查找下一项：从当前光标往后找第一个命中；到底了回到第一个。
+   * 选中并滚动到那一格，方便顺着命中位置听/改。
+   */
+  const findNext = () => {
+    const hits = findInfo?.hits || []
+    if (!hits.length) return
+    const cur = selB ? chunkOf(selB.row, selB.col) : null
+    const curMi = cur?.mi ?? -1
+    const curK = cur && selB ? cur.from + (selB.col - cur.col) : -1
+    const next = hits.find((h) => h.mi > curMi || (h.mi === curMi && h.k > curK)) || hits[0]
+    const at = locate(next.mi, next.k)
+    if (!at) return
+    selectCell(at.row, at.col)
+    const el = wrapRef.current
+    if (!el) return
+    const top = rowTops[at.row] ?? 0
+    if (top < el.scrollTop || top + rowH > el.scrollTop + el.clientHeight) {
+      const nextTop = Math.max(0, top - el.clientHeight / 2 + rowH / 2)
+      el.scrollTop = nextTop
+      setScrollTop(nextTop)
+    }
+  }
+
   /**
    * 全部替换：命中的格子一次改完，只留一条撤销记录。
    *
@@ -2404,6 +2662,9 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
     const f = currentFile()
     /** 选区里有几格真的写了 `<v=xx>`（有才显示「删除音量」） */
     const volTargets = scope.filter((c) => volInfo.mark.has(`${c.mi}:${c.k}`))
+    /** 「添加渐变音量」只对连续选区有意义：Ctrl 多选出来的零散格子不行 */
+    const contiguous =
+      scope.length > 1 && scope.every((c, i) => i === 0 || ordOf(c) === ordOf(scope[i - 1]) + 1)
     /** 「在 osu! Editor 中打开」只对单格有效：这一格的时间点 */
     const one = scope.length === 1 ? scope[0] : null
     const oneTime = one ? (ticksByMeasure[one.mi] || [])[one.k] : undefined
@@ -2444,6 +2705,12 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
               sep: true,
               disabled: !scope.length,
               onClick: () => openVolumeDialog(scope),
+            } satisfies EditMenuItem,
+            {
+              label: tr('添加渐变音量…'),
+              hint: contiguous ? undefined : tr('仅连续选区'),
+              disabled: !contiguous,
+              onClick: () => openFadeDialog(scope),
             } satisfies EditMenuItem,
           ]),
       {
@@ -2682,7 +2949,7 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
 
   /** 一行格子下方的 ImportOsu 物件轨道 */
   const renderObjLane = (ri: number) => {
-    const objs = objectsByRow.get(ri)
+    const objs = objLanes.byRow.get(ri)
     if (!objs || !objs.length) return null
     const r = layout.rows[ri]
     if (!r) return null
@@ -2758,8 +3025,9 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
         {objs.map((o, i) => {
           const rs = rowSpans[ri]
           // 开始 / 结束是否落在本行：跨行的滑条/转盘在中间几行只有两条水平线（=）
-          const startsHere = o.start >= rs.start - SNAP_MS
-          const endsHere = o.end <= rs.end + SNAP_MS
+          const rg = objLanes.range.get(o)
+          const startsHere = rg ? rg.first === ri : true
+          const endsHere = rg ? rg.last === ri : true
           const span = !startsHere || !endsHere
           const repCount = o.kind === 'slider' ? Math.max(0, (o.spans ?? 1) - 1) : 0
           const tip = `${o.kind} · ${fmtOsuTime(o.start)}${o.kind === 'circle' ? '' : ` – ${fmtOsuTime(o.end)}`}${
@@ -3431,6 +3699,18 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
                   {tr('一个都不勾 = custom（正文里只能用代号调用）；勾多个会用')} <span className="mono">|</span>{' '}
                   {tr('连起来。')}
                 </div>
+                {(() => {
+                  const cur = hsDefs.find((h) => h.name === defDlg.sel)
+                  const subs = cur?.subSlots || []
+                  if (!subs.length) return null
+                  return (
+                    <div className="hint gd-def-tip">
+                      {tr('副槽位：')} <span className="mono">{subs.join('|')}</span>
+                      {' '}
+                      {tr('（主槽位下不了音效时的退路；优先级 slidertick > sliderside > successor）')}
+                    </div>
+                  )
+                })()}
               </>
             ) : null}
 
@@ -3478,9 +3758,10 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
                   if (e.key === 'Escape') {
                     e.preventDefault()
                     closeFind()
-                  } else if (e.key === 'Enter' && findInfo?.changed) {
+                  } else if (e.key === 'Enter') {
+                    // 查找框里按 Enter = 查找下一项（替换走「全部替换」按钮 / 替换框的 Enter）
                     e.preventDefault()
-                    doReplaceAll()
+                    findNext()
                   }
                 }}
               />
@@ -3545,6 +3826,9 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
                   ? tr('匹配 {total} 格 · 会改 {changed} 格', { total: findInfo.total, changed: findInfo.changed })
                   : tr('先填要查找的代号')}
               </span>
+              <button className="btn small" disabled={!findInfo?.total} onClick={findNext}>
+                {tr('查找下一项')}
+              </button>
               <button className="btn small" onClick={closeFind}>
                 {tr('关闭')}
               </button>
@@ -3618,6 +3902,106 @@ export default function GridEditor({ fileId, doc, theme, onPlaySample }: Props) 
           </div>
         </div>
       ) : null}
+
+      {fadeDlg
+        ? (() => {
+            const start = Number(fadeDlg.start)
+            const end = Number(fadeDlg.end)
+            const step = Number(fadeDlg.step)
+            // 空字符串不能算 0（Number('') === 0）
+            const volOk = (s: string) => {
+              if (!s.trim()) return false
+              const n = Number(s)
+              return Number.isInteger(n) && n >= 0 && n <= 100
+            }
+            const valid =
+              volOk(fadeDlg.start) &&
+              volOk(fadeDlg.end) &&
+              fadeDlg.step.trim() !== '' &&
+              Number.isInteger(step) &&
+              step >= 1
+            const points = valid ? fadeVolumePoints(fadeDlg.cells.length, start, end, step) : []
+            const onKey = (e: React.KeyboardEvent) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                applyFade()
+              } else if (e.key === 'Escape') {
+                e.preventDefault()
+                setFadeDlg(null)
+              }
+            }
+            return (
+              <div className="gd-vol-overlay" onMouseDown={() => setFadeDlg(null)}>
+                <div className="gd-vol-dlg" onMouseDown={(e) => e.stopPropagation()}>
+                  <div className="gd-vol-title">{tr('添加渐变音量')}</div>
+                  <div className="hint">
+                    {tr(
+                      '选中连续的 {n} 格：从起始音量线性变到结束音量；每隔 {s} 个时值写一条 <v>，首尾一定会写。',
+                      { n: fadeDlg.cells.length, s: fadeDlg.step || '1' },
+                    )}
+                  </div>
+                  <div className="gd-fade-grid">
+                    <label>
+                      <span className="hint">{tr('起始音量')}</span>
+                      <input
+                        className="gd-vol-input mono"
+                        autoFocus
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={fadeDlg.start}
+                        onFocus={(e) => e.currentTarget.select()}
+                        onChange={(e) => setFadeDlg((d) => (d ? { ...d, start: e.target.value } : d))}
+                        onKeyDown={onKey}
+                      />
+                    </label>
+                    <label>
+                      <span className="hint">{tr('结束音量')}</span>
+                      <input
+                        className="gd-vol-input mono"
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={fadeDlg.end}
+                        onFocus={(e) => e.currentTarget.select()}
+                        onChange={(e) => setFadeDlg((d) => (d ? { ...d, end: e.target.value } : d))}
+                        onKeyDown={onKey}
+                      />
+                    </label>
+                    <label>
+                      <span className="hint">{tr('每多少时值变一次')}</span>
+                      <input
+                        className="gd-vol-input mono"
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={fadeDlg.step}
+                        onFocus={(e) => e.currentTarget.select()}
+                        onChange={(e) => setFadeDlg((d) => (d ? { ...d, step: e.target.value } : d))}
+                        onKeyDown={onKey}
+                      />
+                    </label>
+                  </div>
+                  <div className="gd-vol-foot">
+                    <span className="hint">
+                      {valid
+                        ? tr('将在 {n} 个位置写入', { n: points.length })
+                        : tr('音量要 0–100 的整数，间隔至少 1')}
+                    </span>
+                    <button className="btn small" onClick={() => setFadeDlg(null)}>
+                      {tr('取消')}
+                    </button>
+                    <button className="btn small accent" disabled={!valid} onClick={applyFade}>
+                      {tr('确定')}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )
+          })()
+        : null}
     </div>
   )
 }

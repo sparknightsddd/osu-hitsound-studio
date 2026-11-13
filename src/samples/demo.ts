@@ -41,10 +41,15 @@ hitsound sliderside = default.blank
 @Fill = /K (K K) (K K K) (K K K K)/
 @Backbeat = /D - K -/
 
-## keysound（有音高的音效）：每个音高一个 wav，模板里用 <loop()> 列音名、<int()> 算八度
-## 下面这行会按 A0.wav … C8.wav 展开 88 个音高；第二个写法是音色库文件（.sf2/.sf3）
-keysound custom piano = ("piano/<loop("A","L","B","C","H","D","I","E","F","J","G","K")><int((i+9)/12)>.wav", A0, C8)
-keysound custom guitar = "guitar.sf2"      ## 音色库模式（暂不支持解码，会用内置合成音试听）
+## keysound（有音高的音效）
+## 多文件：路径以 / 或 \ 结尾 + files= 模板（<loop()> 列音名、<int()> 算八度）
+## 也支持 files={"A0.wav","A#0.wav",…} 按半音逐个列；lowest/highest 可写 21 或 A0
+keysound custom piano = "piano/"
+{lowest=A0,highest=C8,files="<loop("A","L","B","C","H","D","I","E","F","J","G","K")><int((i+9)/12)>.wav"}
+## 单文件音色库：路径不以 / 结尾就是 singlefile；bank/preset/program/percussion 默认 0/false
+keysound custom guitar = "guitar.sf2" {bank=0,program=0}
+## .sfz 不需要 bank/preset，直接写路径
+## keysound custom violin = "violin.sfz"
 
 [Timing]
 ## 时间轴(ms), 每拍毫秒数(可用 bpm(135)), 每小节拍数, 重置模式, 重置拍数, 偏移
@@ -113,7 +118,7 @@ hitsound custom D = default.normal-hitnormal
 
 [Keysound]
 ## 第一行用花括号指定乐器，乐器需要先用 keysound 定义，例如：
-## keysound custom piano = ("piano/<loop("A","L","B","C")><int((i+9)/12)>.wav", A0, C8)
+## keysound custom piano = "piano/" {lowest=A0,highest=C8,files="<loop("A","L","B","C")><int((i+9)/12)>.wav"}
 ## {piano}
 ## /4C D E F/
 

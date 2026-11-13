@@ -12,8 +12,10 @@ import type {
   SectionMark,
   Settings,
   SlotAlt,
+  SubSlot,
   TimingPoint,
 } from './types'
+import { SUB_SLOT_ORDER } from './types'
 import { MeasureGrid } from './measures'
 import { parseColorToken } from './colors'
 
@@ -90,19 +92,35 @@ const TYPE_MAP: Record<string, HitType> = {
   t: 'slidertick',
 }
 
+/** 副槽位名（sliderslide 是 osu 文件名里的拼写，作为 sliderside 的别名） */
+const SUB_MAP: Record<string, SubSlot> = {
+  sliderside: 'sliderside',
+  sliderslide: 'sliderside',
+  slidertick: 'slidertick',
+  successor: 'successor',
+}
+
 function parseAlt(raw: string, from: number, to: number, diags: Diagnostic[], abs: number): SlotAlt {
   const r = raw.trim().toLowerCase()
   if (r === 'custom') return { raw, custom: true, from: abs + from, to: abs + to }
+  if (SUB_MAP[r]) {
+    return { raw, custom: false, sub: SUB_MAP[r], from: abs + from, to: abs + to }
+  }
   if (r.includes('-')) {
     const [a, b] = r.split('-')
     const ss = SET_MAP[a]
+    // `soft-sliderside` 是副槽位：set 只作为提示（导出时以主槽位为准），不写进 alts
+    const sub = SUB_MAP[b] || (b === 's' ? 'sliderside' : b === 't' ? 'slidertick' : undefined)
+    if (ss && sub) {
+      return { raw, custom: false, sampleSet: ss, sub, from: abs + from, to: abs + to }
+    }
     const tt = TYPE_MAP[b]
     if (!ss || !tt) {
       diags.push({
         from: abs + from,
         to: abs + to,
         severity: 'error',
-        message: `无法识别的音效槽位 "${raw}"（可用：soft/normal/drum + hitnormal/hitwhistle/hitfinish/hitclap/sliderside/slidertick，或缩写如 sc、dw）`,
+        message: `无法识别的音效槽位 "${raw}"（可用：soft/normal/drum + hitnormal/hitwhistle/hitfinish/hitclap，副槽位写 sliderside/slidertick/successor，或缩写如 sc、dw）`,
         code: 'slot-unknown',
       })
     }
@@ -116,12 +134,20 @@ function parseAlt(raw: string, from: number, to: number, diags: Diagnostic[], ab
     }
   }
   if (TYPE_MAP[r] && r.length > 2) {
-    // 完整写法：hitnormal / hitwhistle / hitfinish / hitclap / sliderside / slidertick。
+    // 完整写法：hitnormal / hitwhistle / hitfinish / hitclap。
     // 不带 set 表示「哪种音效固定，s/n/d 留给导出时按优先级挑」。
+    // sliderside/slidertick 已在上面按副槽位处理。
+    if (r === 'sliderside' || r === 'slidertick') {
+      return { raw, custom: false, sub: SUB_MAP[r], from: abs + from, to: abs + to }
+    }
     return { raw, custom: false, hitType: TYPE_MAP[r], from: abs + from, to: abs + to }
   }
   if (r.length === 2) {
     const ss = SET_MAP[r[0]]
+    const sub = r[1] === 's' ? 'sliderside' : r[1] === 't' ? 'slidertick' : ''
+    if (ss && sub) {
+      return { raw, custom: false, sampleSet: ss, sub, from: abs + from, to: abs + to }
+    }
     const tt = TYPE_MAP[r[1]]
     if (!ss || !tt) {
       diags.push({
@@ -149,8 +175,9 @@ function parseSlotPart(
   s: string,
   abs: number,
   diags: Diagnostic[],
-): { alts: SlotAlt[]; indices: IndexRange[]; name: string; nameStart: number } {
+): { alts: SlotAlt[]; subs: SubSlot[]; indices: IndexRange[]; name: string; nameStart: number } {
   const alts: SlotAlt[] = []
+  const subs: SubSlot[] = []
   const indices: IndexRange[] = []
   let rest = s
   // 逐个 alt 扫描：alt  boleh 带 {..}
@@ -163,7 +190,13 @@ function parseSlotPart(
     let j = pos
     while (j < rest.length && rest[j] !== '|' && rest[j] !== '{' && rest[j] !== ' ') j++
     const raw = rest.slice(pos, j)
-    if (raw) alts.push(parseAlt(raw, pos, j, diags, abs))
+    if (raw) {
+      const alt = parseAlt(raw, pos, j, diags, abs)
+      // 副槽位单独记；主槽位才进 alts
+      if (alt.sub) {
+        if (!subs.includes(alt.sub)) subs.push(alt.sub)
+      } else alts.push(alt)
+    }
     pos = j
     if (rest[pos] === '{') {
       let depth = 0
@@ -187,7 +220,7 @@ function parseSlotPart(
   }
   // 剩余部分为自定义音效名
   while (pos < rest.length && rest[pos] === ' ') pos++
-  return { alts, indices, name: rest.slice(pos).trim(), nameStart: pos }
+  return { alts, subs, indices, name: rest.slice(pos).trim(), nameStart: pos }
 }
 
 function splitTopLevel(s: string, sep: string): string[] {
@@ -365,6 +398,183 @@ export interface ParseOptions {
    * 打包给别人的谱子会把 path 删掉，靠这一条仍然能找回同目录的音频/音效。
    */
   baseDir?: string
+}
+
+
+// ---------------------------------------------------------------------------
+// keysound 参数块：`keysound ... = "路径" {mode=..., files=...}`
+// ---------------------------------------------------------------------------
+
+/** 按顶层逗号切分（忽略引号、圆括号、花括号里的逗号） */
+function splitKsArgs(s: string): string[] {
+  const out: string[] = []
+  let depth = 0
+  let inQ = false
+  let cur = ''
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (c === '"' || c === "'") {
+      inQ = !inQ
+      cur += c
+      continue
+    }
+    if (!inQ && (c === '{' || c === '(' || c === '[')) depth++
+    else if (!inQ && (c === '}' || c === ')' || c === ']')) depth--
+    if (c === ',' && !inQ && depth === 0) {
+      out.push(cur)
+      cur = ''
+      continue
+    }
+    cur += c
+  }
+  if (cur.trim()) out.push(cur)
+  return out.map((x) => x.trim()).filter(Boolean)
+}
+
+/** 从 RHS 末尾取出 `{...}` 参数块（同行写法）；路径里不会出现合法花括号 */
+function takeTrailingBraceBlock(s: string): { head: string; body: string } | null {
+  let inQ = false
+  let start = -1
+  let depth = 0
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (c === '"' || c === "'") {
+      inQ = !inQ
+      continue
+    }
+    if (inQ) continue
+    if (c === '{') {
+      if (depth === 0) start = i
+      depth++
+    } else if (c === '}') {
+      depth--
+      if (depth === 0 && start >= 0 && s.slice(i + 1).trim() === '') {
+        return { head: s.slice(0, start).trim(), body: s.slice(start + 1, i) }
+      }
+      if (depth < 0) return null
+    }
+  }
+  return null
+}
+
+interface KeysoundParams {
+  mode?: 'multifile' | 'singlefile'
+  low?: number
+  high?: number
+  files?: { kind: 'list'; items: string[] } | { kind: 'template'; text: string }
+  bank: number
+  preset: number
+  program: number
+  percussion: boolean
+  tune: number
+}
+
+/** 解析花括号里的 `键=值` 列表；未知键给 warning，不打断解析 */
+function parseKeysoundParams(body: string, from: number, diags: Diagnostic[]): KeysoundParams {
+  const out: KeysoundParams = { bank: 0, preset: 0, program: 0, percussion: false, tune: 0 }
+  const known = new Set(['mode', 'lowest', 'highest', 'files', 'bank', 'preset', 'program', 'percussion', 'tune'])
+  for (const part of splitKsArgs(body)) {
+    const eq = part.indexOf('=')
+    if (eq < 0) {
+      diags.push({
+        from,
+        to: from + part.length,
+        severity: 'warning',
+        message: `keysound 参数 "${part}" 不是 键=值 形式，已忽略`,
+        code: 'ks-param',
+      })
+      continue
+    }
+    const key = part.slice(0, eq).trim().toLowerCase()
+    const raw = part.slice(eq + 1).trim()
+    if (!known.has(key)) {
+      diags.push({
+        from,
+        to: from + part.length,
+        severity: 'warning',
+        message: `未知的 keysound 参数 "${key}"（可用：${[...known].join(' / ')}）`,
+        code: 'ks-param-unknown',
+      })
+      continue
+    }
+    if (key === 'mode') {
+      const v = unquote(raw).toLowerCase()
+      if (v === 'multifile' || v === 'singlefile') out.mode = v
+      else
+        diags.push({
+          from,
+          to: from + part.length,
+          severity: 'error',
+          message: `mode 只能是 multifile 或 singlefile（现在是 "${raw}"）`,
+          code: 'ks-mode',
+        })
+    } else if (key === 'lowest' || key === 'highest') {
+      const n = parsePitchToken(raw)
+      if (n === null)
+        diags.push({
+          from,
+          to: from + part.length,
+          severity: 'error',
+          message: `${key} 无法识别："${raw}"（可以写 21 / A0 / C#4）`,
+          code: 'ks-range',
+        })
+      else if (key === 'lowest') out.low = n
+      else out.high = n
+    } else if (key === 'files') {
+      if (raw.startsWith('{')) {
+        if (!raw.endsWith('}')) {
+          diags.push({ from, to: from + part.length, severity: 'error', message: 'files={...} 缺少右花括号', code: 'ks-files' })
+          continue
+        }
+        const items = splitKsArgs(raw.slice(1, -1)).map(unquote).filter(Boolean)
+        if (!items.length)
+          diags.push({ from, to: from + part.length, severity: 'error', message: 'files={} 里至少要有一个文件名', code: 'ks-files' })
+        else out.files = { kind: 'list', items }
+      } else {
+        const text = unquote(raw)
+        if (!text)
+          diags.push({ from, to: from + part.length, severity: 'error', message: 'files= 后面缺少模板字符串', code: 'ks-files' })
+        else out.files = { kind: 'template', text }
+      }
+    } else if (key === 'bank' || key === 'preset' || key === 'program') {
+      const n = Number(unquote(raw))
+      const max = key === 'bank' ? 128 : 127
+      if (!Number.isInteger(n) || n < 0 || n > max)
+        diags.push({
+          from,
+          to: from + part.length,
+          severity: 'error',
+          message: `${key} 必须是 0~${max} 的整数（现在是 "${raw}"）`,
+          code: 'ks-preset',
+        })
+      else out[key] = n
+    } else if (key === 'percussion') {
+      const v = unquote(raw).toLowerCase()
+      if (['true', '1', 'on', 'yes', 'y'].includes(v)) out.percussion = true
+      else if (['false', '0', 'off', 'no', 'n', ''].includes(v)) out.percussion = false
+      else
+        diags.push({
+          from,
+          to: from + part.length,
+          severity: 'error',
+          message: `percussion 只能是 true / false（现在是 "${raw}"）`,
+          code: 'ks-percussion',
+        })
+    } else if (key === 'tune') {
+      const n = Number(unquote(raw))
+      if (!Number.isFinite(n))
+        diags.push({ from, to: from + part.length, severity: 'error', message: `tune 必须是数字（音分）`, code: 'ks-tune' })
+      else out.tune = n
+    }
+  }
+  return out
+}
+
+function ksLibraryOf(p: string): 'sf2' | 'sf3' | 'sfz' | 'sample' {
+  if (/\.sf2$/i.test(p)) return 'sf2'
+  if (/\.sf3$/i.test(p)) return 'sf3'
+  if (/\.sfz$/i.test(p)) return 'sfz'
+  return 'sample'
 }
 
 export function parseChart(text: string, opts: ParseOptions = {}): ChartDoc {
@@ -709,12 +919,66 @@ export function parseChart(text: string, opts: ParseOptions = {}): ChartDoc {
             }
           }
           const leftAbs = line.start + line.code.indexOf(leftPart)
-          const { alts, indices, name } = parseSlotPart(leftPart, leftAbs, diags)
+          const { alts, subs, indices, name } = parseSlotPart(leftPart, leftAbs, diags)
+          // 副槽位优先级固定，和文本里的书写顺序无关；存的时候就按固定顺序排好
+          subs.sort((a, b) => SUB_SLOT_ORDER.indexOf(a) - SUB_SLOT_ORDER.indexOf(b))
+
+          /**
+           * 副槽位规则：
+           *  - 白板（无代号）可以只有副槽位：hitsound sliderside = default.blank（全局）；
+           *  - 有代号的音效必须至少有一个主槽位（custom 也算主槽位），
+           *    因为副槽位只是「主槽位下不了音效时」的退路；
+           *  - successor 不能做白板（没有可以附着的前一个音效）。
+           */
+          if (subs.length) {
+            if (name && !alts.length) {
+              diags.push({
+                from: leftAbs,
+                to: leftAbs + leftPart.length,
+                severity: 'error',
+                message: `副槽位（${subs.join('|')}）必须搭配一个主槽位，例如 custom|${subs[0]}；只有白板可以只写副槽位`,
+                code: 'sub-slot-needs-main',
+              })
+            }
+            if (!name && subs.includes('successor')) {
+              diags.push({
+                from: leftAbs,
+                to: leftAbs + leftPart.length,
+                severity: 'error',
+                message: 'successor 不能做白板（它需要挂在前一个音效上）',
+                code: 'sub-slot-successor-whiteboard',
+              })
+            }
+          }
           let value = rhs
           let defaultRef: string | undefined
           let path: string | undefined
           let keys: KeysoundSpec | undefined
+          let library: HitsoundDef['library']
           let soundFont = false
+          /**
+           * keysound 参数块：`= "路径" { ... }`（同行）或下一行单独一个大括号块。
+           * 先把块摘出来，剩下的才是路径 / 旧版元组。
+           */
+          let ksParams: KeysoundParams | null = null
+          let ksBlockFrom = line.start
+          let ksBlockTo = line.end
+          if (isKs) {
+            const same = takeTrailingBraceBlock(value)
+            if (same) {
+              value = same.head
+              ksParams = parseKeysoundParams(same.body, line.start + line.code.indexOf('{') + 1, diags)
+            } else {
+              const next = lines[li + 1]
+              const nextCode = next ? next.code.trim() : ''
+              if (next && nextCode.startsWith('{') && nextCode.endsWith('}') && nextCode.includes('=')) {
+                ksParams = parseKeysoundParams(nextCode.slice(1, -1), next.start + next.code.indexOf('{') + 1, diags)
+                ksBlockFrom = next.start
+                ksBlockTo = next.end
+                li++
+              }
+            }
+          }
           if (/^default\./i.test(value)) {
             defaultRef = value.slice(8)
           } else if (/^\(([\s\S]*)\)\s*$/.test(value) && isKs) {
@@ -733,10 +997,15 @@ export function parseChart(text: string, opts: ParseOptions = {}): ChartDoc {
             const hi = parsePitchToken(args[2] ?? '')
             const tune = args[3] !== undefined ? Number(args[3]) : 0
             keys = {
+              mode: 'multifile',
               pattern: unquote(args[0] ?? ''),
               low: lo ?? PIANO_LOW,
               high: hi ?? PIANO_HIGH,
               tune: Number.isFinite(tune) ? tune : 0,
+              bank: 0,
+              preset: 0,
+              program: 0,
+              percussion: false,
             }
             if (lo === null || hi === null)
               diags.push({
@@ -758,7 +1027,131 @@ export function parseChart(text: string, opts: ParseOptions = {}): ChartDoc {
               code: 'hs-quote',
             })
           }
-          if (/\.(sf2|sf3)$/i.test(path || '')) soundFont = true
+          if (isKs && !keys) {
+            const rawPath = (path || '').trim()
+            const files = ksParams?.files
+            const dirLike = /[\\/]$/.test(rawPath)
+            const hasTemplate = /<[A-Za-z]+\s*\(/.test(rawPath) || (files?.kind === 'template' && /<[A-Za-z]+\s*\(/.test(files.text))
+            const inferred: 'multifile' | 'singlefile' =
+              dirLike || files || hasTemplate ? 'multifile' : 'singlefile'
+            const mode = ksParams?.mode || inferred
+            const low = ksParams?.low ?? PIANO_LOW
+            const high = ksParams?.high ?? PIANO_HIGH
+            const tune = ksParams?.tune ?? 0
+            if (mode === 'multifile') {
+              // 目录（以 / 或 \ 结尾）+ files=...；或者路径本身就是模板（旧式写法）
+              let prefix = rawPath
+              let pattern = ''
+              if (files?.kind === 'template') {
+                // 没写结尾斜杠但路径看起来像目录（没有扩展名）时也按目录拼，宽松一点
+                const looksDir = dirLike || !/\.[a-z0-9]+$/i.test(rawPath)
+                pattern = looksDir ? `${prefix.replace(/[\\/]+$/, '')}/${files.text}` : files.text
+              } else if (files?.kind === 'list') {
+                if (!dirLike)
+                  diags.push({
+                    from: ksBlockFrom,
+                    to: ksBlockTo,
+                    severity: 'warning',
+                    message: 'files={...} 配的是文件名列表，路径最好以 / 或 \\ 结尾；现在按目录处理',
+                    code: 'ks-dir',
+                  })
+                pattern = prefix.replace(/[\\/]+$/, '')
+              } else if (hasTemplate) {
+                pattern = rawPath
+              } else if (dirLike) {
+                // 目录 + 没有 files：参数不完整，别按模板展开 88 个同路径的文件
+                pattern = ''
+                diags.push({
+                  from: line.start + line.code.indexOf(rightPart),
+                  to: ksBlockTo,
+                  severity: 'error',
+                  message: 'multifile 需要用 files=... 指定文件名模板或列表（路径是目录时要写 files=）',
+                  code: 'ks-files-missing',
+                })
+              } else {
+                pattern = rawPath
+                diags.push({
+                  from: line.start + line.code.indexOf(rightPart),
+                  to: ksBlockTo,
+                  severity: 'warning',
+                  message: 'multifile 路径里没有发现模板（<loop()>/<int()>）；如果这是目录，请用 / 结尾并写 files=',
+                  code: 'ks-pattern',
+                })
+              }
+              const list = files?.kind === 'list' ? files.items : undefined
+              let finalHigh = high
+              if (list) {
+                finalHigh = ksParams?.high ?? low + list.length - 1
+                if (finalHigh - low + 1 !== list.length)
+                  diags.push({
+                    from: ksBlockFrom,
+                    to: ksBlockTo,
+                    severity: 'error',
+                    message: `files 列表有 ${list.length} 个文件，但 ${low}~${finalHigh} 需要 ${finalHigh - low + 1} 个；每个半音一个文件`,
+                    code: 'ks-files-count',
+                  })
+              }
+              if (finalHigh < low)
+                diags.push({
+                  from: ksBlockFrom,
+                  to: ksBlockTo,
+                  severity: 'error',
+                  message: `lowest (${low}) 不能高于 highest (${finalHigh})`,
+                  code: 'ks-range-order',
+                })
+              keys = {
+                mode: 'multifile',
+                pattern,
+                low,
+                high: finalHigh,
+                tune,
+                fileList: list,
+                bank: 0,
+                preset: 0,
+                program: 0,
+                percussion: false,
+              }
+              path = pattern || rawPath
+            } else {
+              if (dirLike)
+                diags.push({
+                  from: line.start + line.code.indexOf(rightPart),
+                  to: ksBlockTo,
+                  severity: 'error',
+                  message: 'singlefile 的路径不能以 / 或 \\ 结尾（那是 multifile 的目录写法）',
+                  code: 'ks-dir-single',
+                })
+              if (files)
+                diags.push({
+                  from: ksBlockFrom,
+                  to: ksBlockTo,
+                  severity: 'warning',
+                  message: 'singlefile 模式下 files= 会被忽略（singlefile 只有一个文件）',
+                  code: 'ks-files-single',
+                })
+              keys = {
+                mode: 'singlefile',
+                pattern: '',
+                low,
+                high: Math.max(low, high),
+                tune,
+                bank: ksParams?.bank ?? 0,
+                preset: ksParams?.preset ?? 0,
+                program: ksParams?.program ?? 0,
+                percussion: ksParams?.percussion ?? false,
+              }
+              library = ksLibraryOf(rawPath)
+              if (library === 'sample' && !/\.(wav|ogg|oga|mp3|flac|m4a)$/i.test(rawPath))
+                diags.push({
+                  from: line.start + line.code.indexOf(rightPart),
+                  to: ksBlockTo,
+                  severity: 'warning',
+                  message: `singlefile 的文件后缀 "${rawPath.split('.').pop() || ''}" 不是常见音频/音色库格式`,
+                  code: 'ks-ext',
+                })
+            }
+          }
+          if (library === 'sf2' || library === 'sf3') soundFont = true
           // keysound 的名字允许全小写（如 guitar / piano），hitsound 代号大小写不限
           if (name && !(isKs ? /^[A-Za-z][A-Za-z0-9_]*$/.test(name) : /^[A-Za-z]+$/.test(name))) {
             diags.push({
@@ -779,14 +1172,16 @@ export function parseChart(text: string, opts: ParseOptions = {}): ChartDoc {
             nameFrom: name ? nameFrom : leftAbs,
             nameTo: name ? nameFrom + name.length : leftAbs,
             alts,
+            subSlots: subs,
             indices,
             value,
             defaultRef,
             path,
             keys,
+            library,
             soundFont,
             from: line.start,
-            to: line.end,
+            to: ksParams ? ksBlockTo : line.end,
             line: li + 1,
           })
           break
@@ -981,13 +1376,31 @@ export function parseChart(text: string, opts: ParseOptions = {}): ChartDoc {
     })
   }
   for (const h of hitsounds) {
-    if (h.kind !== 'keysound' || !h.keys) continue
-    const res = expandKeysoundPath({ pattern: h.keys.pattern, low: h.keys.low, high: h.keys.high, tune: h.keys.tune, lists: listMap })
+    if (h.kind !== 'keysound' || !h.keys || h.keys.mode !== 'multifile') continue
+    if (!h.keys.fileList?.length && !h.keys.pattern) continue
     const files = new Map<number, string>()
-    for (const [midi, rel] of res.files) files.set(midi, resolvePath(baseDir, rel))
+    if (h.keys.fileList?.length) {
+      // files={...}：按半音递增，最低音对应第 1 个文件
+      const list = h.keys.fileList
+      for (let i = 0; i < list.length; i++) {
+        const item = list[i]
+        const abs = /^[a-z]:[\\/]/i.test(item) || item.startsWith('/') || item.startsWith('//')
+        const rel = abs ? item : h.keys.pattern ? `${h.keys.pattern.replace(/[\\/]+$/, '')}/${item}` : item
+        files.set(h.keys.low + i, resolvePath(baseDir, rel))
+      }
+    } else {
+      const res = expandKeysoundPath({
+        pattern: h.keys.pattern,
+        low: h.keys.low,
+        high: h.keys.high,
+        tune: h.keys.tune,
+        lists: listMap,
+      })
+      for (const [midi, rel] of res.files) files.set(midi, resolvePath(baseDir, rel))
+      for (const e of res.errors)
+        diags.push({ from: h.from, to: h.to, severity: 'error', message: e, code: 'ks-pattern' })
+    }
     h.keyFiles = files
-    for (const e of res.errors)
-      diags.push({ from: h.from, to: h.to, severity: 'error', message: e, code: 'ks-pattern' })
   }
 
   const body = parseHitsoundBody(bodyLines, ctx)

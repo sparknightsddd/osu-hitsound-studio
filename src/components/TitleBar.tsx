@@ -17,11 +17,13 @@ import {
   importOsu,
   importOsuSounds,
   saveActive,
+  writeOsuHitsounds,
 } from '../core/actions'
 import { isDesktop } from '../core/desktop'
 import { openAppSettings } from './AppSettingsDialog'
 import { openReview } from './ReviewDialog'
 import { t } from '../i18n'
+import { openKeysoundImport } from './KeysoundImportDialog'
 
 interface Item {
   label: string
@@ -107,6 +109,7 @@ export default function TitleBar() {
       { label: t('打开歌曲文件夹…'), hint: 'Ctrl+O', onClick: () => void openChartFolder() },      { label: t('打开 .hs 文件…'), hint: 'Ctrl+I', onClick: () => void openFiles() },
       { label: t('从 .osu 导入（原谱只读）'), onClick: () => void importOsu() },
       { label: t('从 .osu 导入音效…'), hint: 'Ctrl+Shift+I', onClick: () => void importOsuSounds() },
+      { label: t('导入 MIDI / musictxt 到 [Keysound]…'), onClick: () => openKeysoundImport() },
       { label: t('打开示例谱面'), onClick: () => openDemo() },
       'sep' as const,
       {
@@ -124,6 +127,7 @@ export default function TitleBar() {
       { label: t('将所有音效复制到谱面文件夹内（改名为代号）'), onClick: () => void bundleSoundsToChartDir() },
       'sep' as const,
       { label: t('导出音效包（写入 [Files] path）'), onClick: () => void exportOsuPackage() },
+      { label: t('把音效写入 .osu…（替代 Hitsound Copier）'), onClick: () => void writeOsuHitsounds() },
       { label: t('另存为 .osu…（不复制音效）'), onClick: () => void exportOsu() },
       { label: t('导出时间轴 CSV'), onClick: () => void exportCsv() },
       { label: t('导出音效映射 JSON'), onClick: () => void exportJson() },
@@ -154,7 +158,7 @@ export default function TitleBar() {
         onClick: () => useStore.getState().setTheme('auto'),
       },
       'sep' as const,
-      { label: t('设置…'), onClick: () => openAppSettings() },
+      { label: t('设置…'), hint: 'Ctrl+,', onClick: () => openAppSettings() },
     ] as (Item | 'sep')[],
     play: [
       { label: t('播放 / 暂停'), hint: 'Space', onClick: () => engine.toggle() },

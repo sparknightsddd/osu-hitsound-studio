@@ -4,6 +4,7 @@ import { deleteSample, getSample, putSample } from './sampleDb'
 import { decodeImaAdpcmWav } from './wav'
 import { freqOf } from '../core/pitch'
 import { keySampleName } from '../core/keysound'
+import type { KeyLayoutEntry } from './keyLayout'
 
 export interface BindingInfo {
   name: string
@@ -89,6 +90,8 @@ class AudioEngine {
   loop = false
   /** keysound 找不到该音高的真实样本时，用内置合成音（按真实频率）发声 */
   synthFallback = true
+  /** keysound 乐器 → 每个 MIDI 音高用哪个 buffer / 变调 / 增益（音色库与单文件用） */
+  private keyLayouts = new Map<string, Map<number, KeyLayoutEntry>>()
   /** 各 keysound 乐器的调律偏移（音分），影响合成音频率与样本变调 */
   private keyTune = new Map<string, number>()
   /** 无音频时的虚拟播放头（毫秒） */
@@ -244,6 +247,42 @@ class AudioEngine {
     }
   }
 
+  /** 直接放入一个已解码的 AudioBuffer（音色库 / sfz 样本用，不写持久化） */
+  bindBuffer(name: string, buffer: AudioBuffer) {
+    this.ensureCtx()
+    this.buffers.set(name, buffer)
+    this.emit()
+  }
+
+  /** 解码一段音频字节（Ogg / Wav / MP3）；音色库里的样本用 */
+  async decodeBuffer(data: ArrayBuffer): Promise<AudioBuffer> {
+    this.ensureCtx()
+    return this.decodeAny(data)
+  }
+
+  /** 用 PCM 浮点数据建 AudioBuffer（SF2 的 16-bit 样本用） */
+  pcmBuffer(channels: Float32Array[], sampleRate: number): AudioBuffer {
+    const ctx = this.ensureCtx()
+    const frames = Math.max(1, channels[0]?.length ?? 1)
+    const buf = ctx.createBuffer(Math.max(1, channels.length), frames, sampleRate)
+    for (let c = 0; c < channels.length; c++) buf.getChannelData(c).set(channels[c])
+    return buf
+  }
+
+  /**
+   * 设置某个 keysound 乐器的按键布局。
+   * `scheduleKeySample` 会优先查这张表；表里没有的音高再退回 `ks:乐器#音高`。
+   */
+  setKeyLayout(instrument: string, map: Map<number, KeyLayoutEntry>) {
+    if (map.size) this.keyLayouts.set(instrument, map)
+    else this.keyLayouts.delete(instrument)
+    this.emit()
+  }
+
+  clearKeyLayouts() {
+    this.keyLayouts.clear()
+  }
+
   async bindSample(name: string, file: File, persist = true) {
     this.ensureCtx()
     const buf = await file.arrayBuffer()
@@ -275,9 +314,10 @@ class AudioEngine {
    * 造成「切了谱但音效还是上一份的」。
    */
   unbindAll() {
-    if (!this.buffers.size && !this.persisted.size) return
+    if (!this.buffers.size && !this.persisted.size && !this.keyLayouts.size) return
     this.buffers.clear()
     this.persisted.clear()
+    this.keyLayouts.clear()
     this.emit()
   }
 
@@ -437,6 +477,8 @@ class AudioEngine {
   /** 某个音高有没有真实样本 */
   hasKeySample(instrument: string | undefined, midi: number): boolean {
     if (!instrument) return false
+    const layout = this.keyLayouts.get(instrument)?.get(midi)
+    if (layout) return !!this.buffers.get(layout.buffer)
     return !!this.bufferFor(keySampleName(instrument, midi))
   }
 
@@ -466,15 +508,20 @@ class AudioEngine {
     tuneCents: number,
   ): boolean {
     if (!instrument) return false
-    const buf = this.bufferFor(keySampleName(instrument, midi))
+    const layout = this.keyLayouts.get(instrument)?.get(midi)
+    const name = layout ? layout.buffer : keySampleName(instrument, midi)
+    const buf = layout ? this.buffers.get(name) : this.bufferFor(name)
     if (!buf) return false
     const ctx = this.ctx!
     const src = ctx.createBufferSource()
     src.buffer = buf
-    // 非 0 调律时整体变调（多为 0，样本本身就是按音录好的）
-    if (tuneCents) src.playbackRate.value = Math.pow(2, tuneCents / 1200)
+    // 音色库/单文件自带根音变调；再叠加乐器调律（音分）
+    let rate = layout?.rate ?? 1
+    if (tuneCents) rate *= Math.pow(2, tuneCents / 1200)
+    if (rate !== 1) src.playbackRate.value = rate
     const g = ctx.createGain()
-    g.gain.value = Math.max(0, Math.min(1.5, volume / 100))
+    const base = (volume / 100) * (layout?.gain ?? 1)
+    g.gain.value = Math.max(0, Math.min(4, base))
     src.connect(g)
     g.connect(this.sfxBus)
     src.start(Math.max(when, ctx.currentTime))

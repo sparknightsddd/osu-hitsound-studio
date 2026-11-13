@@ -74,6 +74,9 @@ async function shot(name) {
 await send('Runtime.enable')
 await send('Page.enable')
 await wait(2800)
+// 断言用的是中文文案：先强制中文，避免上次运行留下的 en-US 影响
+await ev(`window.__i18n.setLang('zh-CN'); 1`)
+await wait(400)
 
 // 先清掉可能残留的偏好，从默认状态开始
 await ev(`localStorage.removeItem('hsstudio.importColors'); localStorage.removeItem('hsstudio.importCodes'); 1`)

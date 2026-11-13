@@ -79,6 +79,15 @@ ${body.join('\n')}
   T('冲突组合是 [A B]', list[0]?.names.join('+') === 'A+B', JSON.stringify(list[0]?.names))
   T('冲突带两处落点', JSON.stringify(list[0]?.times) === '[0,2000]', JSON.stringify(list[0]?.times))
   T('原因是 w/f/c 跨采样组', !!list[0]?.reason.includes('同属'), list[0]?.reason || '')
+  // 可翻译版本：界面按语言拼接 {detail}，不能只留中文原文
+  const c = list[0]
+  T('冲突带可翻译的 reasonKey', !!c?.reasonKey?.includes('{detail}'), c?.reasonKey || '')
+  T('冲突带明细片段（代号 + 采样组）', (c?.reasonParts?.length ?? 0) === 2, JSON.stringify(c?.reasonParts))
+  T(
+    '明细片段能拼回中文原文',
+    (c?.reasonParts || []).map((p) => `${p.name} 在 ${p.sets.join('/')}`).join('、') === c?.reasonVars?.detail,
+    String(c?.reasonVars?.detail),
+  )
 }
 
 {
@@ -105,6 +114,8 @@ ${body.join('\n')}
   const doc = parseChart(head(['hitsound soft-hitclap A = "a.wav"'], ['#0', '/[A Nope] = = =/']))
   const list = slotConflictReport(doc)
   T('未定义代号算冲突', list.length === 1 && list[0].reason.includes('Nope'), JSON.stringify(list))
+  T('未定义冲突带名单 reasonList', JSON.stringify(list[0]?.reasonList) === '["Nope"]', JSON.stringify(list[0]?.reasonList))
+  T('未定义冲突带 reasonKey', list[0]?.reasonKey === '[Define] 里没有代号 {names}', list[0]?.reasonKey || '')
 }
 
 // ---------------------------------------------------------------------------

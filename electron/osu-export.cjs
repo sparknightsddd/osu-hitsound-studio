@@ -116,20 +116,27 @@ function exportPackage(opts) {
     let buffer = null
     if (f.mix) {
       const sources = [...from]
-      for (const ref of f.defaults || []) {
+      // delays 与 sources 一一对应：successor 的 B 会带一个正的延迟
+      const delays = (f.delays || []).slice(0, from.length)
+      while (delays.length < sources.length) delays.push(0)
+      const defs = f.defaults || []
+      for (let i = 0; i < defs.length; i++) {
+        const ref = defs[i]
         const p = path.join(opts.defaultDir || '', `default.${ref}.wav`)
-        if (opts.defaultDir && fs.existsSync(p)) sources.push(p)
-        else errors.push(`${name}：内置音效缺失 default.${ref}.wav`)
+        if (opts.defaultDir && fs.existsSync(p)) {
+          sources.push(p)
+          delays.push(((f.defaultDelays || [])[i] || 0))
+        } else errors.push(`${name}：内置音效缺失 default.${ref}.wav`)
       }
       if (!sources.length) {
         errors.push(`${name}：没有可混音的源文件`)
         continue
       }
-      // 单源且不需要写混音信息 → 等价于复制，别白跑一遍重编码
-      if (sources.length === 1 && !f.mixMeta) {
+      // 单源且不需要写混音信息/延迟 → 等价于复制，别白跑一遍重编码
+      if (sources.length === 1 && !f.mixMeta && !delays.some((d) => d)) {
         buffer = readSafe(sources[0])
       } else {
-        const r = mixBuffers(sources, f.mixMeta)
+        const r = mixBuffers(sources, f.mixMeta, delays)
         if (!r.ok) {
           errors.push(`${name}：${r.errors.join('；') || '混音失败'}`)
           continue
@@ -156,8 +163,11 @@ function exportPackage(opts) {
         skipped.push(name)
         continue
       }
-      conflicts.push(name)
-      continue
+      // 全局白板副槽位（sliderside/slidertick）明确要覆盖，其它仍然先拦下来
+      if (!f.overwrite) {
+        conflicts.push(name)
+        continue
+      }
     }
     writes.push({ to, buffer })
   }
@@ -167,13 +177,32 @@ function exportPackage(opts) {
     return { ok: false, conflict: true, dir, conflicts, skipped, errors }
   }
 
-  // 清理旧导出放在选名字之前：删掉 [EZHS].osu / [EZHS1].osu 后可以重新用 [EZHS]
-  const removed = opts.cleanOld ? cleanOldExports(dir, base) : []
-  const { diff, file } = pickFreeName(dir, base)
-  const osuPath = path.join(dir, file)
+  // 自定义输出路径（「直接写入 .osu」用）：不选名字、不清理旧导出，可选先备份
+  const customPath = String(opts.osuPath || '').trim()
+  let removed = []
+  let diff = ''
+  let osuPath = ''
+  if (customPath) {
+    osuPath = customPath
+    diff = String(opts.version || path.basename(customPath).replace(/\.osu$/i, '')).trim()
+    if (opts.backup && fs.existsSync(osuPath)) {
+      try {
+        fs.copyFileSync(osuPath, osuPath + '.bak')
+      } catch (err) {
+        return { ok: false, error: `备份失败：${String(err)}` }
+      }
+    }
+  } else {
+    // 清理旧导出放在选名字之前：删掉 [EZHS].osu / [EZHS1].osu 后可以重新用 [EZHS]
+    removed = opts.cleanOld ? cleanOldExports(dir, base) : []
+    const picked = pickFreeName(dir, base)
+    diff = picked.diff
+    osuPath = path.join(dir, picked.file)
+  }
 
   try {
-    fs.writeFileSync(osuPath, setVersion(String(opts.text || ''), diff), 'utf8')
+    const text = customPath ? String(opts.text || '') : setVersion(String(opts.text || ''), diff)
+    fs.writeFileSync(osuPath, text, 'utf8')
     for (const w of writes) fs.writeFileSync(w.to, w.buffer)
   } catch (err) {
     return { ok: false, error: String(err) }

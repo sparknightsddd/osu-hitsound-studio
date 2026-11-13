@@ -107,7 +107,6 @@ export function toOsu(
   lines.push('[TimingPoints]')
   for (const t of timing ?? defaultTimingLines(doc)) lines.push(fmtTimingLine(t))
   lines.push('')
-  lines.push('// 音效映射见「导出音效映射」，本节由 osu Hitsound Studio 生成')
   lines.push('[HitObjects]')
   for (const o of hitObjects) lines.push(o)
   lines.push('')
@@ -141,14 +140,20 @@ export function toTimelineCsv(doc: ChartDoc): string {
 }
 
 export function slotLabel(h: HitsoundDef): string {
-  if (!h.alts.length) return 'custom'
-  return h.alts
-    .map((a) => {
-      if (a.custom) return 'custom'
-      if (a.sampleSet && a.hitType) return `${a.sampleSet}-${a.hitType}`
-      return a.hitType || a.raw
-    })
-    .join('|')
+  const main = h.alts.length
+    ? h.alts
+        .map((a) => {
+          if (a.custom) return 'custom'
+          if (a.sampleSet && a.hitType) return `${a.sampleSet}-${a.hitType}`
+          return a.hitType || a.raw
+        })
+        .join('|')
+    : h.subSlots.length
+      ? ''
+      : 'custom'
+  const subs = (h.subSlots || []).join('|')
+  if (main && subs) return `${main}|${subs}`
+  return main || subs
 }
 
 export function toSampleMapJson(doc: ChartDoc, bindings: Record<string, string> = {}): string {

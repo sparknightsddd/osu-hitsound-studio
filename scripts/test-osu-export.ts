@@ -8,7 +8,8 @@
  *  - 时间向下取整、hitSound 位、normalSet/additionSet、编号 1 不带后缀
  */
 import { parseChart } from '../src/core/parse'
-import { applyHitsoundTiming, osuFileName, planOsuExport } from '../src/core/osuExport'
+import { applyHitsoundTiming, osuFileName, planOsuExport, setExportTranslator } from '../src/core/osuExport'
+import { toOsu } from '../src/core/exporter'
 import type { OsuExportPlan } from '../src/core/osuExport'
 import type { ChartDoc } from '../src/core/types'
 
@@ -390,6 +391,75 @@ hitsound soft-hitclap Ad = "d.wav"
   const hs = plan.hitObjects[0].split(',')[5].split(':')
   ok(hs[1] === '3', `物件的 additionSet 还是 drum(3)：${plan.hitObjects[0]}`)
   ok(hs[2] === '0' && hs[3] === '0', '物件末尾仍然是 0:0（编号/音量交给绿线）')
+}
+
+// 17) 能不混音就不混音：C 的候选是 sw|sc，W 只有 sw → C 去 sc，W 留 sw
+{
+  const doc = parseChart(
+    HEAD(
+      ['hitsound soft-hitwhistle|soft-hitclap C = "c.wav"', 'hitsound soft-hitwhistle W = default.soft-hitwhistle'].join('\n'),
+      ['#0', '/[C W] = = =/'].join('\n'),
+    ),
+  )
+  const plan = planOsuExport(doc)
+  ok(plan.errors.length === 0, `双槽位叠音没有报错：${plan.errors.join(' / ')}`)
+  ok(plan.mixCount === 0, `本来能分开就不混音（mixCount=${plan.mixCount}）`)
+  const g = plan.groups[0]
+  ok((g?.slots.get('soft-hitclap') || []).join('+') === 'C', `C 落在 soft-hitclap：${JSON.stringify([...(g?.slots || [])])}`)
+  ok((g?.slots.get('soft-hitwhistle') || []).join('+') === 'W', `W 留在 soft-hitwhistle：${JSON.stringify([...(g?.slots || [])])}`)
+  const file = plan.files.find((f) => f.to === 'soft-hitclap.wav')
+  ok(!!file && !file.mix, `只复制 C 到 soft-hitclap.wav，不混音：${JSON.stringify(plan.files.map((f) => [f.to, f.mix]))}`)
+  ok(plan.samples.get(0)?.bits === 10, `hitSound 位 = whistle(2)+clap(8)：${plan.samples.get(0)?.bits}`)
+}
+
+// 18) 实在分不开时仍然混音：两个代号都只有 soft-hitclap
+{
+  const doc = parseChart(
+    HEAD(
+      ['hitsound soft-hitclap C = "c.wav"', 'hitsound soft-hitclap D = "d.wav"'].join('\n'),
+      ['#0', '/[C D] = = =/'].join('\n'),
+    ),
+  )
+  const plan = planOsuExport(doc)
+  ok(plan.mixCount === 1, `两个同槽位音效仍然混音：mixCount=${plan.mixCount}`)
+  const f = plan.files.find((x) => x.to.startsWith('soft-hitclap'))
+  ok(!!f && f.mix && f.from.length === 2, `混音来源有两个：${JSON.stringify(f && { to: f.to, from: f.from.length, mix: f.mix })}`)
+}
+
+// 19) 导出文本里不再写工具自己的注释（保持和 osu 官方输出一致的干净格式）
+{
+  const doc = parseChart(HEAD('hitsound custom Aa = default.normal-hitnormal', '/Aa Aa Aa Aa/'))
+  const text = toOsu(doc, 'EZHS', ['256,192,0,1,0,0:0:0:0:'])
+  ok(!text.includes('音效映射见'), '导出文本没有「音效映射见…」注释')
+  ok(!text.includes('osu Hitsound Studio'), '导出文本没有工具署名')
+  ok(/\[TimingPoints\][\s\S]*\r\n\r\n\[HitObjects\]/.test(text), '[HitObjects] 前仍然保留一个空行')
+  ok(text.split('[HitObjects]')[1].trim().startsWith('256,192,0,'), '[HitObjects] 第一行是物件')
+}
+
+// 20) 槽位错误 / 提示走翻译钩子（应用里注入 t()；单测默认中文）
+{
+  const doc = parseChart(
+    HEAD(
+      ['hitsound soft-hitwhistle w = default.soft-hitwhistle', 'hitsound normal-hitfinish x = default.normal-hitfinish'].join('\n'),
+      ['#0', '/[w x] = = =/'].join('\n'),
+    ),
+  )
+  // 假的翻译：只保留占位符，方便确认参数确实传进来了
+  setExportTranslator((_msg, vars) => `EN<${Object.entries(vars || {}).map(([k, v]) => `${k}=${v}`).join(';')}>`)
+  const en = planOsuExport(doc)
+  ok(en.errors.length > 0 && en.errors.every((e) => e.startsWith('EN<')), `注入翻译后错误用译文：${en.errors[0]}`)
+  ok(
+    en.noSlotErrors.length === en.skippedCombos.length && en.noSlotErrors.every((e) => en.errors.includes(e)),
+    `noSlotErrors 与 skippedCombos 对得上：${en.noSlotErrors.length}/${en.skippedCombos.length}`,
+  )
+  ok(!en.noSlotErrors.some((e) => e.includes('没有合法的槽位')), '注入后 noSlotErrors 里不再有中文原文')
+  ok(en.noSlotErrors[0].includes('names=w x') && en.noSlotErrors[0].includes('time='), `错误带上组合名与时间：${en.noSlotErrors[0]}`)
+  ok(en.warnings.every((w) => w.startsWith('EN<')), '提示也走翻译钩子')
+
+  setExportTranslator(null)
+  const zh = planOsuExport(doc)
+  ok(zh.errors.some((e) => e.includes('没有合法的槽位')), '不注入时保持中文原文')
+  ok(zh.errors.every((e) => !e.startsWith('EN<')), '取消注入后不再有译文标记')
 }
 
 console.log(bad ? `\n${bad} 项失败` : '\n全部通过')

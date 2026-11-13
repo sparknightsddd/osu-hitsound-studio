@@ -30,6 +30,14 @@ export interface GridClip {
   rect: boolean
   /** 复制时在哪种模式：hitsound 的格子不要粘到 keysound 谱表上 */
   mode?: 'hitsound' | 'keysound'
+  /**
+   * 复制时所在文件 + 被复制的格子键（`mi:k`）。
+   * 复制后源选区通常还亮着，用户再 Ctrl 点目标格时它会一起算进选区；
+   * 粘贴时如果这些格子还在同一份谱里被选中，要把它们从锚点里排除，
+   * 否则「复制 ABCD → Ctrl 点 5/9/13 → 粘贴」会把源选区也当成一个锚点。
+   */
+  sourceFileId?: string
+  sourceKeys?: string[]
 }
 
 let clip: GridClip | null = null
@@ -40,6 +48,8 @@ export function setGridClip(c: GridClip) {
     cols: c.cols,
     rect: c.rect,
     mode: c.mode,
+    sourceFileId: c.sourceFileId,
+    sourceKeys: c.sourceKeys ? [...c.sourceKeys] : undefined,
     items: c.items.map((it) => ({ dr: it.dr, dc: it.dc, cell: { ...it.cell, names: [...it.cell.names] } })),
   }
 }

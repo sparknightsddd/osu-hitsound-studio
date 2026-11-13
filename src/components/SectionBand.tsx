@@ -7,6 +7,7 @@
  *   - 点右侧标识 → 聚焦它；再按 Backspace / Delete → 删除分节符
  */
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { t } from '../i18n'
 
 interface Props {
   time: number
@@ -68,14 +69,14 @@ export default function SectionBand({ time, name, height, autoFocus, onFocused, 
         e.preventDefault()
         inputRef.current?.focus()
       }}
-      title="分节符：点击空白处输入段落名称"
+      title={t('分节符：点击空白处输入段落名称')}
     >
       <div className="gd-section-dash" />
       <input
         ref={inputRef}
         className="gd-section-name"
         value={value}
-        placeholder="点击输入段落名称"
+        placeholder={t('点击输入段落名称')}
         spellCheck={false}
         onChange={(e) => {
           editing.current = true
@@ -92,7 +93,7 @@ export default function SectionBand({ time, name, height, autoFocus, onFocused, 
         ref={markRef}
         type="button"
         className="gd-section-mark"
-        title="分节符：点一下再按 Backspace / Delete 删除"
+        title={t('分节符：点一下再按 Backspace / Delete 删除')}
         onMouseDown={(e) => {
           // 不让按钮默认抢焦点（有的平台点击不聚焦），手动来
           e.preventDefault()

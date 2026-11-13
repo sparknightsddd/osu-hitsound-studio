@@ -17,11 +17,22 @@ export type HitType =
   | 'sliderside'
   | 'slidertick'
 
+/**
+ * 副槽位：主槽位下不了音效时的退路。
+ * 优先级固定 slidertick > sliderside > successor，和 [Define] 里的书写顺序无关。
+ */
+export type SubSlot = 'slidertick' | 'sliderside' | 'successor'
+
+/** 固定优先级（越靠前越优先） */
+export const SUB_SLOT_ORDER: SubSlot[] = ['slidertick', 'sliderside', 'successor']
+
 export interface SlotAlt {
   raw: string
   custom: boolean
   sampleSet?: SampleSet
   hitType?: HitType
+  /** 这个 token 是副槽位（不进 alts，单独记到 HitsoundDef.subSlots） */
+  sub?: SubSlot
   from: number
   to: number
 }
@@ -42,15 +53,22 @@ export interface HitsoundDef {
   nameTo: number
   alts: SlotAlt[]
   indices: IndexRange[]
+  /**
+   * 副槽位（sliderside / slidertick / successor）。
+   * 只有主槽位下不了音效时才会用到；优先级固定，见 SUB_SLOT_ORDER。
+   */
+  subSlots: SubSlot[]
   /** 原始值（default.xxx 或路径） */
   value: string
   /** [Define] 末尾可选的颜色，归一化成 #rrggbb；没写就是 undefined（用默认色） */
   color?: string
   defaultRef?: string
   path?: string
-  /** keysound 的多文件定义（每个音高一个 wav/ogg） */
+  /** keysound 的定义参数（多文件 / 单文件、音域、preset 等） */
   keys?: KeysoundSpec
-  /** 音色库文件（.sf2 / .sf3） */
+  /** keysound 单文件类型：sf2/sf3/sfz/普通音频；多文件为 undefined */
+  library?: 'sf2' | 'sf3' | 'sfz' | 'sample'
+  /** 音色库文件（.sf2 / .sf3）；保留给旧界面判断 */
   soundFont?: boolean
   /** keysound 多文件模式展开出的「MIDI -> 路径」表 */
   keyFiles?: Map<number, string>
@@ -59,16 +77,30 @@ export interface HitsoundDef {
   line: number
 }
 
-/** keysound 的多文件定义：按模板逐半音展开。见语法 0.3.1.2 */
+/** keysound 的定义参数，对应 `keysound ... = "路径" { ... }` 里的花括号 */
+export type KeysoundMode = 'multifile' | 'singlefile'
+
 export interface KeysoundSpec {
-  /** 路径模板，可含 <list(...)> / <loop(...)> / <int(...)> 指令 */
+  /** multifile = 每个音高一个文件；singlefile = 一个样本/音色库 */
+  mode: KeysoundMode
+  /**
+   * multifile 的路径模板（可含 <list>/<loop>/<int>），或文件列表时的目录前缀；
+   * singlefile 为空（实际路径在 HitsoundDef.path）。
+   */
   pattern: string
-  /** 最低音（MIDI 编号） */
+  /** 最低音（MIDI 编号，C4=60） */
   low: number
   /** 最高音（MIDI 编号） */
   high: number
   /** 调律偏移（音分），正值升高 */
   tune: number
+  /** multifile 用 `files={...}` 显式列出文件名时，按半音递增 */
+  fileList?: string[]
+  /** singlefile 的音色库选择；默认值是 0/false */
+  bank: number
+  preset: number
+  program: number
+  percussion: boolean
 }
 
 export interface PhraseDef {

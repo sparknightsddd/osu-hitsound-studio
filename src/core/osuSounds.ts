@@ -357,16 +357,31 @@ export function regionAt(tps: OsuTimingPoint[], t: number): Region | null {
 // Slider 节点时间换算
 // ---------------------------------------------------------------------------
 
-/** 取时间 t 处生效的每拍毫秒数（只认绿线）与滑条速度倍率（只认红线） */
+/**
+ * 取时间 t 处生效的每拍毫秒数（只认红线）与滑条速度倍率（只认绿线）。
+ *
+ * 关键规则：红线会把 SV 重置为 1。红线之前那条绿线不会跨过红线继续生效，
+ * 只有「最后一条红线之后（含同一时刻）」的绿线才决定 SV。
+ * 以前只记最后一条绿线，导致红线后、下一条绿线前的滑条尾按旧 SV 算，位置整体偏掉。
+ */
 export function timingAt(tps: OsuTimingPoint[], t: number): { beatLength: number; sv: number } {
   let beatLength = 0
-  let sv = 1
+  /** 最后一条红线的时刻；没有红线时是 -Infinity */
+  let redTime = -Infinity
+  /** 最后一条绿线（时间 <= t） */
+  let green: OsuTimingPoint | null = null
   for (let i = 0; i < tps.length; i++) {
     if (tps[i].time > t) break
     const tp = tps[i]
-    if (tp.uninherited) beatLength = tp.beatLength
-    else sv = 100 / Math.abs(tp.beatLength || 100)
+    if (tp.uninherited) {
+      beatLength = tp.beatLength
+      redTime = tp.time
+    } else {
+      green = tp
+    }
   }
+  // 绿线在红线之前 → 已被红线重置；同一时刻的绿线仍然有效
+  const sv = green && green.time >= redTime ? 100 / Math.abs(green.beatLength || 100) : 1
   return { beatLength: beatLength || 500, sv: sv || 1 }
 }
 
@@ -443,9 +458,21 @@ function makeNameFactory(): () => string {
   }
 }
 
-/** osu! 目录里音色文件的命名：normal-hitnormal.wav / normal-hitnormal7.wav */
-export function sampleFileName(set: SampleSet, hit: HitType, index: number): string {
-  return index === 0 ? `${set}-${hit}.wav` : `${set}-${hit}${index}.wav`
+/**
+ * osu! 支持的音色文件扩展名，按查找优先级。
+ * 同一槽位同时有 .wav 和 .ogg 时，osu! 会先用 .wav；只放 .ogg 的谱面以前
+ * 被这里写死的 .wav 漏掉，表现就是「ogg 没被导入」。
+ */
+export const SAMPLE_EXTS = ['wav', 'ogg', 'mp3'] as const
+
+/** osu! 目录里音色文件的命名：normal-hitnormal.wav / normal-hitnormal7.ogg */
+export function sampleFileName(set: SampleSet, hit: HitType, index: number, ext = 'wav'): string {
+  return index === 0 ? `${set}-${hit}.${ext}` : `${set}-${hit}${index}.${ext}`
+}
+
+/** 同一个槽位按优先级要试的文件名（wav → ogg → mp3） */
+export function sampleFileCandidates(set: SampleSet, hit: HitType, index: number): string[] {
+  return SAMPLE_EXTS.map((ext) => sampleFileName(set, hit, index, ext))
 }
 
 class SoundCodePool {
@@ -494,22 +521,33 @@ class SoundCodePool {
    * 相同 (采样组, 类型, 索引) 复用同一 code；文件内容相同也复用同一 code。
    */
   async get(set: SampleSet, hit: HitType, index: number, customFile?: string): Promise<SoundCode> {
-    const key = `${set}|${hit}|${index}`
+    // 同一个 (set, hit, index) 也可能对应不同文件：hitSample 的最后一个字段允许
+    // 每个物件写自己的文件名。只按槽位+编号缓存会把两个不同的 .ogg/.wav 合并成一个
+    // code，后面物件的路径就被前一个“改掉”了。
+    const key = `${set}|${hit}|${index}|${customFile ? customFile.toLowerCase() : ''}`
     const exist = this.byKey.get(key)
     if (exist) return exist
 
     let file = ''
     if (customFile && (await this.exists(customFile))) file = customFile
     if (!file) {
-      const std = sampleFileName(set, hit, index)
-      if (await this.exists(std)) {
-        file = std
-      } else if (index > 0) {
+      // 标准命名：同槽位可能有 .wav / .ogg / .mp3，按 osu! 的优先级找一个
+      for (const std of sampleFileCandidates(set, hit, index)) {
+        if (await this.exists(std)) {
+          file = std
+          break
+        }
+      }
+      if (!file && index > 0) {
         // osu 的回落：`normal-hitnormal3.wav` 不存在时用不带编号的那个。
         // 谱面里绿线常带 sampleIndex:1，但目录里只有基础名文件；
         // 不回落到这里就会全部退成 default.xxx，听感直接对不上（音效“没加载”）。
-        const base = sampleFileName(set, hit, 0)
-        if (await this.exists(base)) file = base
+        for (const base of sampleFileCandidates(set, hit, 0)) {
+          if (await this.exists(base)) {
+            file = base
+            break
+          }
+        }
       }
     }
 
@@ -520,8 +558,15 @@ class SoundCodePool {
 
   /** 按「文件内容」去重地建一个 code；混音文件会把 HSSM 信息挂到 code.mix 上 */
   private async codeFor(set: SampleSet, hit: HitType, index: number, file: string): Promise<SoundCode> {
-    const contentKey = file ? `sha:${await this.hashOf(file)}` : `def:${defaultRefOf(set, hit)}`
     const own = `${set}-${hit}`
+    /**
+     * 内容去重的 key 带上槽位。
+     *
+     * 只按文件哈希合并的话，`soft-hitwhistle20.ogg` 同时被 whistle 和 clap 用时
+     * 会变成一个 code，[Define] 只能写一个槽位；导出时按文件名猜槽位就会猜错，
+     * 导入再导出会多出混音文件。限制在同一槽位内合并，语义才不会被改掉。
+     */
+    const contentKey = file ? `sha:${await this.hashOf(file)}|${own}` : `def:${defaultRefOf(set, hit)}`
     const dup = this.byContent.get(contentKey)
     if (dup) {
       if (!dup.usedAs.includes(own)) dup.usedAs.push(own)
@@ -627,6 +672,9 @@ function resolveCodeSlot(c: SoundCode): string {
   // 一个 code），写死任何一个都会让另一个时刻的叠音冲突，只能留给导出时按组合挑。
   if (used.length > 1) return 'custom'
   const byName = slotFromFileName(c.file)
+  // 副槽位（sliderside/slidertick）不能单独写进 [Define]：它们必须搭配主槽位。
+  // 命中物件的自定义文件名刚好叫 soft-sliderslide.wav 时，按它实际被当成的主槽位写。
+  if (byName && /-(sliderside|sliderslide|slidertick)$/.test(byName)) return used[0] || 'custom'
   return byName || used[0] || 'custom'
 }
 
